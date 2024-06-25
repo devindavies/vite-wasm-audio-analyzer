@@ -1,0 +1,32 @@
+{
+	"name": "vite-wasm-audio-analyzer",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite --port 4000",
+		"build": "vite build && cp ./src/audio-processing/TextDecoder.js ./dist/assets/TextDecoder.js",
+		"lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+		"preview": "vite preview",
+		"build-wasm-audio": "wasm-pack build --release ./wasm-audio --target web --out-dir ../src/wasm-audio && rm -rf ./public/wasm_audio_bg.wasm && cp ./src/wasm-audio/wasm_audio_bg.wasm ./public/wasm_audio_bg.wasm",
+		"build-wasm-canvas": "wasm-pack build ./wasm-canvas --target web --out-dir ../src/wasm-canvas"
+	},
+	"dependencies": {
+		"react": "^18.2.0",
+		"react-dom": "^18.2.0",
+		"webfft": "^1.0.3"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.8.0",
+		"@types/audioworklet": "^0.0.55",
+		"@types/node": "^20.14.8",
+		"@types/react": "^18.2.66",
+		"@types/react-dom": "^18.2.22",
+		"@vitejs/plugin-react-swc": "^3.5.0",
+		"autoprefixer": "^10.4.19",
+		"postcss": "^8.4.38",
+		"tailwindcss": "^3.4.4",
+		"typescript": "^5.2.2",
+		"vite": "^5.3.1"
+	}
+}

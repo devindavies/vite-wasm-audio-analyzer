@@ -1,0 +1,7 @@
+/Users/devin/Documents/GitHub/vite-wasm-audio-analyzer/wasm-audio/target/wasm32-unknown-unknown/release/deps/libconsole_error_panic_hook-8f13a75784db14b9.rmeta: /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console_error_panic_hook-0.1.7/src/lib.rs
+
+/Users/devin/Documents/GitHub/vite-wasm-audio-analyzer/wasm-audio/target/wasm32-unknown-unknown/release/deps/libconsole_error_panic_hook-8f13a75784db14b9.rlib: /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console_error_panic_hook-0.1.7/src/lib.rs
+
+/Users/devin/Documents/GitHub/vite-wasm-audio-analyzer/wasm-audio/target/wasm32-unknown-unknown/release/deps/console_error_panic_hook-8f13a75784db14b9.d: /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console_error_panic_hook-0.1.7/src/lib.rs
+
+/Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/console_error_panic_hook-0.1.7/src/lib.rs:
