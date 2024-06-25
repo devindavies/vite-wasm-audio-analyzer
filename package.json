@@ -5,7 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite --port 4000",
-		"build": "vite build && cp ./src/audio-processing/TextDecoder.js ./dist/assets/TextDecoder.js",
+		"build": "npm run build-wasm-audio && vite build && cp ./src/audio-processing/TextDecoder.js ./dist/assets/TextDecoder.js",
 		"lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
 		"preview": "vite preview",
 		"build-wasm-audio": "wasm-pack build --release ./wasm-audio --target web --out-dir ../src/wasm-audio && rm -rf ./public/wasm_audio_bg.wasm && cp ./src/wasm-audio/wasm_audio_bg.wasm ./public/wasm_audio_bg.wasm",
