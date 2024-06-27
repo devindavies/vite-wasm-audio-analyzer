@@ -1,9 +1,0 @@
-/Users/devin/Documents/GitHub/vite-wasm-audio-analyzer/wasm-audio/target/debug/deps/libserde_wasm_bindgen-fccaa799d9baa436.rmeta: /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/lib.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/de.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/error.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/ser.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/../README.md
-
-/Users/devin/Documents/GitHub/vite-wasm-audio-analyzer/wasm-audio/target/debug/deps/serde_wasm_bindgen-fccaa799d9baa436.d: /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/lib.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/de.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/error.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/ser.rs /Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/../README.md
-
-/Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/lib.rs:
-/Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/de.rs:
-/Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/error.rs:
-/Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/ser.rs:
-/Users/devin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-wasm-bindgen-0.6.5/src/../README.md:
