@@ -34,7 +34,7 @@ export async function setupAudio(
 
 	try {
 		// Fetch the WebAssembly module that performs signal detection.
-		const response = await fetch("wasm_audio_bg.wasm");
+		const response = await fetch("wasm_fft_analyzer_bg.wasm");
 
 		const wasmBytes = await response.arrayBuffer();
 		// Add our audio processor worklet to the context.

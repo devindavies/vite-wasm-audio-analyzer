@@ -1,6 +1,6 @@
 import './TextDecoder.js';
 
-import init, { WasmSpectrumAnalyzer, } from "../wasm-audio/wasm_audio.js";
+import init, { WasmSpectrumAnalyzer, } from "@devinmdavies/wasm-fft-analyzer";
 
 
 
