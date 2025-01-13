@@ -21,7 +21,7 @@
 		"@types/audioworklet": "^0.0.65",
 		"@types/node": "^22.10.5",
 		"@types/react": "^19.0.2",
-		"@types/react-dom": "^19.0.2",
+		"@types/react-dom": "^19.0.3",
 		"@vitejs/plugin-react-swc": "^3.7.2",
 		"autoprefixer": "^10.4.20",
 		"postcss": "^8.4.49",
