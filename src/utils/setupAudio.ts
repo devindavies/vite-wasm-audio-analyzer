@@ -1,6 +1,6 @@
 import type { default as RTANodeType } from "./RTANode";
 import { getWebAudioMediaStream } from "./getWebAudioMediaStream";
-import FFTProcessorUrl from "../audio-processing/FFTProcessor.js?worker&url";
+import FFTProcessorUrl from "../audio-processing/FFTProcessor.ts?worker&url";
 
 export async function setupAudio(
 	onSignalDetectedCallback: (signal: Float32Array) => void,

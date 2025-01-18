@@ -1,5 +1,4 @@
 import type { WasmAudioEvent } from "../types/Event.js";
-import "./TextDecoder.js";
 import init, { WasmSpectrumAnalyzer } from "@devinmdavies/wasm-fft-analyzer";
 
 export class FFTProcessor extends AudioWorkletProcessor {
@@ -37,7 +36,7 @@ export class FFTProcessor extends AudioWorkletProcessor {
 				// RTANode has sent us a message containing the Wasm library to load into
 				// our context as well as information about the audio device used for
 				// recording.
-				init().then(() => {
+				init({ module_or_path: WebAssembly.compile(data) }).then(() => {
 					this.port.postMessage({ type: "wasm-module-loaded" });
 				});
 				//this.canvasPort = event.ports[0];
