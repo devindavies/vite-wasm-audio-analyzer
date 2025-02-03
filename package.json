@@ -19,7 +19,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",
-		"@tailwindcss/postcss": "^4.0.0",
+		"@tailwindcss/postcss": "^4.0.3",
 		"@types/audioworklet": "^0.0.68",
 		"@types/node": "^22.10.10",
 		"@types/react": "^19.0.8",
