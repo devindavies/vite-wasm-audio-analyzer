@@ -11,7 +11,7 @@
 	},
 	"dependencies": {
 		"@devinmdavies/wasm-fft-analyzer": "^0.4.0",
-		"@tailwindcss/vite": "^4.0.3",
+		"@tailwindcss/vite": "^4.0.6",
 		"@vercel/analytics": "^1.4.1",
 		"@vercel/speed-insights": "^1.1.0",
 		"react": "^19.0.0",
