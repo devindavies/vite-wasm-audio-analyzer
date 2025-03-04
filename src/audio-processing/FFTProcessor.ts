@@ -8,6 +8,7 @@ export class FFTProcessor extends AudioWorkletProcessor {
 	numAudioSamplesPerAnalysis: number;
 	maxFreq: number;
 	minFreq: number;
+	memory: WebAssembly.Memory | null;
 	//canvasPort?: MessagePort;
 
 	constructor() {
@@ -27,6 +28,7 @@ export class FFTProcessor extends AudioWorkletProcessor {
 		this.detector = null;
 		this.minFreq = 20;
 		this.maxFreq = 20000;
+		this.memory = null;
 	}
 
 	onmessage(event: MessageEvent<WasmAudioEvent>) {
@@ -36,9 +38,12 @@ export class FFTProcessor extends AudioWorkletProcessor {
 				// RTANode has sent us a message containing the Wasm library to load into
 				// our context as well as information about the audio device used for
 				// recording.
-				init({ module_or_path: WebAssembly.compile(data) }).then(() => {
-					this.port.postMessage({ type: "wasm-module-loaded" });
-				});
+				init({ module_or_path: WebAssembly.compile(data) }).then(
+					(initOuput) => {
+						this.port.postMessage({ type: "wasm-module-loaded" });
+						this.memory = initOuput.memory;
+					},
+				);
 				//this.canvasPort = event.ports[0];
 				break;
 			}
@@ -109,21 +114,22 @@ export class FFTProcessor extends AudioWorkletProcessor {
 		if (
 			this.numAudioSamplesPerAnalysis &&
 			this.totalSamples >= this.numAudioSamplesPerAnalysis &&
-			this.detector
+			this.detector &&
+			this.memory
 		) {
-			const result = this.detector.analyze(
-				this.samples,
-				this.minFreq,
-				this.maxFreq,
+			this.detector.analyze(this.samples, this.minFreq, this.maxFreq);
+
+			const outputPtr = this.detector.ouput();
+			const output = new Float32Array(
+				this.memory.buffer,
+				outputPtr,
+				this.numAudioSamplesPerAnalysis,
 			);
 
-			if (result.length !== 0) {
+			if (output.length !== 0) {
 				this.port.postMessage({
 					type: "signal",
-					data: result.map(
-						(value) =>
-							20 * Math.log10((2 * value) / this.numAudioSamplesPerAnalysis),
-					),
+					data: output,
 				});
 			}
 		}

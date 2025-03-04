@@ -216,7 +216,7 @@ const AudioAnalyzer: React.FC = () => {
 	const makeGrad = useCallback(() => {
 		const canvas = canvasRef.current;
 		const ctx = canvas?.getContext("2d");
-		if (!canvas || !ctx) return;
+		if (!(canvas && ctx)) return;
 
 		const {
 			analyzerWidth,
@@ -351,7 +351,7 @@ const AudioAnalyzer: React.FC = () => {
 	);
 
 	const createScales = useCallback(() => {
-		if (!canvasRef.current || !canvasXRef.current || !canvasRRef.current)
+		if (!(canvasRef.current && canvasXRef.current && canvasRRef.current))
 			return;
 
 		const { analyzerWidth, initialX, innerRadius, scaleMin, unitWidth } =
@@ -362,7 +362,7 @@ const AudioAnalyzer: React.FC = () => {
 		const canvasR = canvasRRef.current;
 		const scaleR = canvasR.getContext("2d");
 		const canvas = canvasRef.current;
-		if (!scaleX || !scaleR) return;
+		if (!(scaleX && scaleR)) return;
 
 		const freqLabels: (number | [number, string])[] = [];
 		const isDualHorizontal = channelLayout === CHANNEL_LAYOUT.DUAL_HORIZONTAL;
@@ -1000,7 +1000,11 @@ const AudioAnalyzer: React.FC = () => {
 
 		// COMPUTE CHANNEL COORDINATES (uses spaceV)
 
-		const channelCoords = [];
+		const channelCoords: {
+			channelTop: number;
+			channelBottom: number;
+			analyzerBottom: number;
+		}[] = [];
 		for (const channel of [0, 1]) {
 			const channelTop =
 				channelLayout === CHANNEL_LAYOUT.DUAL_VERTICAL
@@ -1187,7 +1191,7 @@ const AudioAnalyzer: React.FC = () => {
 		const canvasX = canvasXRef.current;
 		const canvasR = canvasRRef.current;
 		const canvas = canvasRef.current;
-		if (!canvasX || !canvasR || !canvas) return;
+		if (!(canvasX && canvasR && canvas)) return;
 		const ctx = canvas.getContext("2d");
 		if (!ctx) return;
 
@@ -1587,7 +1591,7 @@ const AudioAnalyzer: React.FC = () => {
 					ctx.fillStyle = bgColor;
 
 					// exclude the reflection area when overlay is true and reflexAlpha == 1 (avoids alpha over alpha difference, in case bgAlpha < 1)
-					if (channel === 0 || (!radial && !isDualCombined))
+					if (channel === 0 || !(radial || isDualCombined))
 						ctx.fillRect(
 							initialX,
 							channelTop - channelGap,
@@ -1959,7 +1963,7 @@ const AudioAnalyzer: React.FC = () => {
 			if (isDualHorizontal && !radial) ctx.setTransform(1, 0, 0, 1, 0, 0);
 
 			// create Reflex effect - for dual-combined and dual-horizontal do it only once, after channel 1
-			if ((!isDualHorizontal && !isDualCombined) || channel) doReflex(channel);
+			if (!(isDualHorizontal || isDualCombined) || channel) doReflex(channel);
 		} // for ( let channel = 0; channel < nChannels; channel++ ) {
 
 		updateEnergy(currentEnergy / (nBars << (nChannels - 1)));

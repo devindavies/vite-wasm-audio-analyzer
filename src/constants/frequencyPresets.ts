@@ -1,5 +1,4 @@
-
-const frequencyPresets = {
+export const frequencyPresets = {
 	bass: [20, 250],
 	lowMid: [250, 500],
 	mid: [500, 2e3],

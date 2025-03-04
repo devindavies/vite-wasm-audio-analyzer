@@ -13,7 +13,7 @@ const AudioController: React.FC = () => {
 	>(undefined);
 
 	const [running, setRunning] = useState(false);
-	const [isFullscreen, setIsFullscreen] = useState(false);
+	const [isFullscreen, _setIsFullscreen] = useState(false);
 
 	const canvas_worker = useRef<Worker | null>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -76,17 +76,25 @@ const AudioController: React.FC = () => {
 				}
 			}, DEBOUNCE_TIMEOUT);
 		}
-	}, []);
+	}, [isFullscreen]);
 
-	const toggleFullscreen = () => {
+	const enterFullscreen = () => {
+		const fsEl = canvasRef.current;
+		if (!fsEl) return;
+		if (fsEl.requestFullscreen) fsEl.requestFullscreen();
+		else if (fsEl.webkitRequestFullscreen) fsEl.webkitRequestFullscreen();
+	};
+
+	const exitFullscreen = () => {
+		if (document.exitFullscreen) document.exitFullscreen();
+		else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+	};
+
+	const _toggleFullscreen = () => {
 		if (isFullscreen) {
-			if (document.exitFullscreen) document.exitFullscreen();
-			else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+			exitFullscreen();
 		} else {
-			const fsEl = canvasRef.current;
-			if (!fsEl) return;
-			if (fsEl.requestFullscreen) fsEl.requestFullscreen();
-			else if (fsEl.webkitRequestFullscreen) fsEl.webkitRequestFullscreen();
+			enterFullscreen();
 		}
 	};
 

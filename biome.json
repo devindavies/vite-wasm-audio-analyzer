@@ -1,6 +1,67 @@
 {
 	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"ignoreUnknown": true,
+		"ignore": [
+			"./src/audio-processing/TextDecoder.js",
+			"./src/wasm-audio/**",
+			"./src/canvas-rendering/**",
+			"./src/components/AudioController.tsx",
+			"dist"
+		]
+	},
 	"linter": {
-		"ignore": ["./src/audio-processing/TextDecoder.js", "./src/wasm-audio/**"]
+		"rules": {
+			"performance": {
+				"all": true
+			},
+			"correctness": {
+				"all": true,
+				"useImportExtensions": "off",
+				"noUnusedVariables": "off",
+				"noNodejsModules": "off"
+			},
+			"suspicious": {
+				"all": true,
+				"noReactSpecificProps": "off",
+				"noConsole": {
+					"level": "error",
+					"options": {
+						"allow": ["assert", "error", "info", "warn"]
+					}
+				}
+			},
+			"security": {
+				"all": true
+			},
+			"complexity": {
+				"all": true,
+				"noExcessiveCognitiveComplexity": "off"
+			}
+		}
+	},
+	"javascript": {
+		"globals": [
+			"window",
+			"document",
+			"navigator",
+			"fetch",
+			"WebSocket",
+			"AudioContext",
+			"AudioWorkletNode",
+			"AudioBuffer",
+			"AudioBufferSourceNode",
+			"AudioDestinationNode",
+			"AudioListener",
+			"AudioParam",
+			"AudioWorkletProcessor",
+			"React",
+			"registerProcessor"
+		]
 	}
 }

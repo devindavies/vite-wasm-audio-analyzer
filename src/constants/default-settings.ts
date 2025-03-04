@@ -1,13 +1,12 @@
 import type { ChannelLayout } from "../types/ChannelLayout";
 import type { ColorMode } from "../types/ColorMode";
 import type { AudioAnalyzer } from "../utils/AudioAnalyzer";
-import type { NewAudioAnalyzer } from "../utils/NewAudioAnalyzer";
 import { type BaseGradient, GRADIENTS } from "./gradients";
-import type {
+import {
 	CHANNEL_SINGLE,
 	COLOR_GRADIENT,
 	FILTER_NONE,
-	FrequencyScale,
+	type FrequencyScale,
 	SCALE_LOG,
 } from "./strings";
 
@@ -46,13 +45,13 @@ export type Options = {
 	mode?: number;
 	noteLabels?: boolean;
 	onCanvasDraw?: (
-		instance: NewAudioAnalyzer,
+		instance: AudioAnalyzer,
 		params: {
 			timestamp: DOMHighResTimeStamp;
 			canvasGradients: CanvasGradient[];
 		},
 	) => void;
-	onCanvasResize?: (reason: string, instance: NewAudioAnalyzer) => void;
+	onCanvasResize?: (reason: string, instance: AudioAnalyzer) => void;
 	outlineBars?: boolean;
 	overlay?: boolean;
 	peakFadeTime?: number;

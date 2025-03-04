@@ -58,6 +58,7 @@ import type { AudioSource } from "../types/AudioSource";
 import type { Reason } from "../types/Reason";
 import type { FrequencyScale } from "../constants/strings";
 import { findY } from "./findY";
+import { frequencyPresets } from "../constants/frequencyPresets";
 
 type AnalyzerBarData = {
 	width: number;
@@ -809,7 +810,7 @@ export class AudioAnalyzer {
 	}
 	get stereo() {
 		deprecate("stereo", "channelLayout");
-		return this._chLayout != CHANNEL_SINGLE;
+		return this._chLayout !== CHANNEL_SINGLE;
 	}
 	set stereo(value) {
 		deprecate("stereo", "channelLayout");
@@ -1123,7 +1124,7 @@ export class AudioAnalyzer {
 
 		const { colorStops } = options;
 
-		if (!Array.isArray(colorStops) || !colorStops.length)
+		if (!(Array.isArray(colorStops) && colorStops.length))
 			throw new AudioMotionError(ERR_GRADIENT_MISSING_COLOR);
 
 		const count = colorStops.length;
@@ -1751,7 +1752,11 @@ export class AudioAnalyzer {
 
 		// COMPUTE CHANNEL COORDINATES (uses spaceV)
 
-		const channelCoords = [];
+		const channelCoords: {
+			channelTop: number;
+			channelBottom: number;
+			analyzerBottom: number;
+		}[] = [];
 		for (const channel of [0, 1]) {
 			const channelTop =
 				_chLayout === CHANNEL_VERTICAL
@@ -2019,13 +2024,13 @@ export class AudioAnalyzer {
 
 		const {
 			isAlpha,
-			isBands,
+			isBands: _isBands,
 			isLeds,
 			isLumi,
-			isOctaves,
+			isOctaves: _isOctaves,
 			isOutline,
 			isRound,
-			noLedGap,
+			noLedGap: _noLedGap,
 		} = this._flg;
 		const {
 			analyzerHeight,
@@ -2079,8 +2084,8 @@ export class AudioAnalyzer {
 		const showPeakLine = showPeaks && this._peakLine && _mode === MODE_GRAPH;
 		const maxBarHeight = _radial ? outerRadius - innerRadius : analyzerHeight;
 		const nominalMaxHeight = maxBarHeight / this._pixelRatio; // for consistent gravity on lo-res or hi-dpi
-		const dbRange = maxDecibels - minDecibels;
-		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = this._leds || [];
+		//const _dbRange = maxDecibels - minDecibels;
+		const [ledCount, _ledSpaceH, ledSpaceV, ledHeight] = this._leds || [];
 
 		if (_energy.val > 0 && _fps > 0)
 			this._spinAngle += (this._spinSpeed * TAU) / 60 / _fps; // spinSpeed * angle increment per frame for 1 RPM
@@ -2255,8 +2260,11 @@ export class AudioAnalyzer {
 		const nChannels = isSingle ? 1 : 2;
 
 		for (let channel = 0; channel < nChannels; channel++) {
-			const { channelTop, channelBottom, analyzerBottom } =
-				channelCoords[channel];
+			const {
+				channelTop,
+				channelBottom: _channelBottom,
+				analyzerBottom,
+			} = channelCoords[channel];
 			const channelGradient = this._gradients[this._selectedGrads[channel]];
 			const colorStops = channelGradient.colorStops;
 			const colorCount = colorStops.length;
@@ -2461,7 +2469,7 @@ export class AudioAnalyzer {
 					_ctx.fillStyle = bgColor;
 
 					// exclude the reflection area when overlay is true and reflexAlpha == 1 (avoids alpha over alpha difference, in case bgAlpha < 1)
-					if (channel === 0 || (!_radial && !isDualCombined))
+					if (channel === 0 || !(_radial || isDualCombined))
 						_ctx.fillRect(
 							initialX,
 							channelTop - channelGap,
@@ -2522,8 +2530,16 @@ export class AudioAnalyzer {
 
 			for (let barIndex = 0; barIndex < nBars; barIndex++) {
 				const bar = _bars[barIndex];
-				const { posX, barCenter, width, freq, binLo, binHi, ratioLo, ratioHi } =
-					bar;
+				const {
+					posX,
+					barCenter,
+					width,
+					freq: _freq,
+					binLo,
+					binHi,
+					ratioLo,
+					ratioHi,
+				} = bar;
 
 				let barValue = Math.max(
 					interpolate(binLo, ratioLo),
@@ -2842,7 +2858,7 @@ export class AudioAnalyzer {
 			if (isDualHorizontal && !_radial) _ctx.setTransform(1, 0, 0, 1, 0, 0);
 
 			// create Reflex effect - for dual-combined and dual-horizontal do it only once, after channel 1
-			if ((!isDualHorizontal && !isDualCombined) || channel) doReflex(channel);
+			if (!(isDualHorizontal || isDualCombined) || channel) doReflex(channel);
 		} // for ( let channel = 0; channel < nChannels; channel++ ) {
 
 		updateEnergy(currentEnergy / (nBars << (nChannels - 1)));
@@ -3143,7 +3159,7 @@ export class AudioAnalyzer {
 		if (!(name in this._gradients))
 			throw new AudioMotionError(ERR_UNKNOWN_GRADIENT, name);
 
-		if (!channelParam || ![0, 1].includes(channelParam)) {
+		if (!(channelParam && [0, 1].includes(channelParam))) {
 			this._selectedGrads[1] = name;
 			channel = 0;
 		}

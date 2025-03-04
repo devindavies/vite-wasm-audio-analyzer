@@ -36,7 +36,7 @@ export default class RTANode extends AudioWorkletNode {
 
 	// Handle an uncaught exception thrown in the FFTProcessor.
 	onprocessorerror = (err: Event) => {
-		console.log(
+		console.error(
 			`An error from AudioWorkletProcessor.process() occurred: ${err}`,
 		);
 	};
