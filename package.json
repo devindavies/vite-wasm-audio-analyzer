@@ -20,7 +20,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",
 		"@types/audioworklet": "^0.0.71",
-		"@types/node": "^22.13.9",
+		"@types/node": "^22.14.0",
 		"@types/react": "^19.0.10",
 		"@types/react-dom": "^19.0.4",
 		"@vitejs/plugin-react-swc": "^3.8.0",
