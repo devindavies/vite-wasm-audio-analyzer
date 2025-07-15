@@ -1,7 +1,7 @@
 {
 	"name": "vite-wasm-audio-analyzer",
 	"private": true,
-	"version": "0.0.0",
+	"version": "1.0.0",
 	"type": "module",
 	"scripts": {
 		"dev": "vite --port 4000",
@@ -18,7 +18,7 @@
 		"react-dom": "^19.0.0"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^1.9.4",
+		"@biomejs/biome": "^2.1.1",
 		"@types/audioworklet": "^0.0.78",
 		"@types/node": "^22.16.4",
 		"@types/react": "^19.0.10",

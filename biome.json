@@ -7,27 +7,35 @@
 	},
 	"files": {
 		"ignoreUnknown": true,
-		"ignore": [
-			"./src/audio-processing/TextDecoder.js",
-			"./src/wasm-audio/**",
-			"./src/canvas-rendering/**",
-			"./src/components/AudioController.tsx",
-			"dist"
+		"includes": [
+			"**",
+			"!src/audio-processing/TextDecoder.js",
+			"!src/wasm-audio/**",
+			"!src/canvas-rendering/**",
+			"!src/components/AudioController.tsx",
+			"!**/dist"
 		]
 	},
 	"linter": {
 		"rules": {
 			"performance": {
-				"all": true
+				"noBarrelFile": "warn",
+				"noDelete": "error",
+				"noReExportAll": "error",
+				"useTopLevelRegex": "error"
 			},
 			"correctness": {
-				"all": true,
+				"noPrivateImports": "error",
 				"useImportExtensions": "off",
 				"noUnusedVariables": "off",
-				"noNodejsModules": "off"
+				"noNodejsModules": "off",
+				"noUndeclaredDependencies": "error",
+				"noUndeclaredVariables": "error",
+				"useExhaustiveDependencies": "error",
+				"useHookAtTopLevel": "error",
+				"useJsxKeyInIterable": "error"
 			},
 			"suspicious": {
-				"all": true,
 				"noReactSpecificProps": "off",
 				"noConsole": {
 					"level": "error",
@@ -36,11 +44,7 @@
 					}
 				}
 			},
-			"security": {
-				"all": true
-			},
 			"complexity": {
-				"all": true,
 				"noExcessiveCognitiveComplexity": "off"
 			}
 		}

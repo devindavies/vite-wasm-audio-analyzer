@@ -1,17 +1,16 @@
 #root {
-  max-width: 100%;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
-  width: 1200px;
+	max-width: 100%;
+	margin: 0 auto;
+	padding: 2rem;
+	text-align: center;
+	width: 1200px;
 }
 
 #container {
-  height: 60vh;
+	height: 60vh;
 }
 
 #wasm-canvas {
-  width: 100%;
-  max-width: 100%;
+	width: 100%;
+	max-width: 100%;
 }
-

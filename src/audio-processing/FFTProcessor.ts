@@ -1,5 +1,5 @@
-import type { WasmAudioEvent } from "../types/Event.js";
 import init, { WasmSpectrumAnalyzer } from "@devinmdavies/wasm-fft-analyzer";
+import type { WasmAudioEvent } from "../types/Event.js";
 
 export class FFTProcessor extends AudioWorkletProcessor {
 	totalSamples: number;

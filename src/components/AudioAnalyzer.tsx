@@ -1,5 +1,3 @@
-import type RTANode from "../utils/RTANode";
-import { setupAudio } from "../utils/setupAudio";
 import {
 	useCallback,
 	useEffect,
@@ -8,6 +6,8 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { type BaseGradient, GRADIENTS } from "../constants/gradients";
+import { C_1, HALF_PI, PI, TAU } from "../constants/math";
 
 import {
 	CHANNEL_LAYOUT,
@@ -29,14 +29,13 @@ import {
 	SCALEY_LABEL_COLOR,
 	SCALEY_MIDLINE_COLOR,
 } from "../constants/strings";
-
-import setCanvas from "../utils/canvas/setCanvas";
-import { FrequencyScale } from "../types/FrequencyScale";
-import { C_1, HALF_PI, PI, TAU } from "../constants/math";
-import { type BaseGradient, GRADIENTS } from "../constants/gradients";
-import type { Gradient } from "../types/Gradient";
 import type { AnalyzerBarData } from "../types/AnalyzerBarData";
+import { FrequencyScale } from "../types/FrequencyScale";
+import type { Gradient } from "../types/Gradient";
+import setCanvas from "../utils/canvas/setCanvas";
 import { findY } from "../utils/findY";
+import type RTANode from "../utils/RTANode";
+import { setupAudio } from "../utils/setupAudio";
 
 type Mode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10;
 

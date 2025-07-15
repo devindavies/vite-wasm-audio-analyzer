@@ -1,44 +1,4 @@
-import { validateFromList } from "./validateFromList";
 import { DEFAULT_SETTINGS, type Options } from "../constants/default-settings";
-import {
-	CHANNEL_SINGLE,
-	CHANNEL_HORIZONTAL,
-	CHANNEL_VERTICAL,
-	CHANNEL_COMBINED,
-	COLOR_GRADIENT,
-	COLOR_BAR_INDEX,
-	COLOR_BAR_LEVEL,
-	SCALE_LOG,
-	SCALE_BARK,
-	SCALE_MEL,
-	SCALE_LINEAR,
-	REASON_RESIZE,
-	DEBOUNCE_TIMEOUT,
-	EVENT_RESIZE,
-	EVENT_FULLSCREENCHANGE,
-	EVENT_CLICK,
-	REASON_FSCHANGE,
-	REASON_USER,
-	REASON_CREATE,
-	GRADIENT_DEFAULT_BGCOLOR,
-	REASON_LORES,
-	FILTER_NONE,
-	FILTER_A,
-	FILTER_B,
-	FILTER_C,
-	FILTER_D,
-	FILTER_468,
-	MODE_GRAPH,
-	FONT_FAMILY,
-	SCALEX_HIGHLIGHT_COLOR,
-	SCALEX_LABEL_COLOR,
-	SCALEX_BACKGROUND_COLOR,
-	SCALEY_LABEL_COLOR,
-	SCALEY_MIDLINE_COLOR,
-	LEDS_UNLIT_COLOR,
-	FPS_COLOR,
-} from "../constants/strings";
-import { GRADIENTS, type BaseGradient } from "../constants/gradients";
 import {
 	AudioMotionError,
 	ERR_FREQUENCY_TOO_LOW,
@@ -51,14 +11,54 @@ import {
 	ERR_REFLEX_OUT_OF_RANGE,
 	ERR_UNKNOWN_GRADIENT,
 } from "../constants/error-messages";
+import { frequencyPresets } from "../constants/frequencyPresets";
+import { type BaseGradient, GRADIENTS } from "../constants/gradients";
 import { C_1, HALF_PI, PI, TAU } from "../constants/math";
+import type { FrequencyScale } from "../constants/strings";
+import {
+	CHANNEL_COMBINED,
+	CHANNEL_HORIZONTAL,
+	CHANNEL_SINGLE,
+	CHANNEL_VERTICAL,
+	COLOR_BAR_INDEX,
+	COLOR_BAR_LEVEL,
+	COLOR_GRADIENT,
+	DEBOUNCE_TIMEOUT,
+	EVENT_CLICK,
+	EVENT_FULLSCREENCHANGE,
+	EVENT_RESIZE,
+	FILTER_468,
+	FILTER_A,
+	FILTER_B,
+	FILTER_C,
+	FILTER_D,
+	FILTER_NONE,
+	FONT_FAMILY,
+	FPS_COLOR,
+	GRADIENT_DEFAULT_BGCOLOR,
+	LEDS_UNLIT_COLOR,
+	MODE_GRAPH,
+	REASON_CREATE,
+	REASON_FSCHANGE,
+	REASON_LORES,
+	REASON_RESIZE,
+	REASON_USER,
+	SCALE_BARK,
+	SCALE_LINEAR,
+	SCALE_LOG,
+	SCALE_MEL,
+	SCALEX_BACKGROUND_COLOR,
+	SCALEX_HIGHLIGHT_COLOR,
+	SCALEX_LABEL_COLOR,
+	SCALEY_LABEL_COLOR,
+	SCALEY_MIDLINE_COLOR,
+} from "../constants/strings";
+import type { AudioSource } from "../types/AudioSource";
 import type { ChannelLayout } from "../types/ChannelLayout";
 import type { Gradient } from "../types/Gradient";
-import type { AudioSource } from "../types/AudioSource";
 import type { Reason } from "../types/Reason";
-import type { FrequencyScale } from "../constants/strings";
 import { findY } from "./findY";
-import { frequencyPresets } from "../constants/frequencyPresets";
+import { validateFromList } from "./validateFromList";
 
 type AnalyzerBarData = {
 	width: number;
@@ -224,13 +224,19 @@ export class AudioAnalyzer {
 		this._canvasGradients = []; // canvas gradients
 
 		// Create a new canvas or use the one provided by the user
-		// biome-ignore lint/style/noNonNullAssertion: <explanation>
-		const canvas = options.canvas ?? document.createElement("canvas")!;
+
+		const canvas = options.canvas ?? document.createElement("canvas");
 
 		this._ownCanvas = !(options.canvas instanceof HTMLCanvasElement);
 
-		// biome-ignore lint/style/noNonNullAssertion: <explanation>
-		this._ctx = canvas.getContext("2d")!;
+		const tempCtx = canvas.getContext("2d");
+		if (!tempCtx) {
+			throw new Error(
+				"CanvasRenderingContext2D not supported. Please use a different browser.",
+			);
+		}
+
+		this._ctx = tempCtx;
 
 		// Register built-in gradients
 		for (const [name, options] of GRADIENTS)
@@ -1200,11 +1206,7 @@ export class AudioAnalyzer {
 	 *
 	 * @param {object} [params]
 	 */
-	setLedParams(params: {
-		maxLeds: number;
-		spaceV: number;
-		spaceH: number;
-	}) {
+	setLedParams(params: { maxLeds: number; spaceV: number; spaceH: number }) {
 		this._ledParams =
 			params.maxLeds > 0 && params.spaceV > 0 && params.spaceH >= 0
 				? [params.maxLeds, params.spaceV, params.spaceH]
