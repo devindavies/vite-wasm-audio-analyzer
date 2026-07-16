@@ -1,3 +1,4 @@
+import wasmUrl from "@devinmdavies/wasm-fft-analyzer/wasm_fft_analyzer_bg.wasm?url";
 import FFTProcessorUrl from "../audio-processing/FFTProcessor.ts?worker&url";
 import { getWebAudioMediaStream } from "./getWebAudioMediaStream";
 import type { default as RTANodeType } from "./RTANode";
@@ -34,7 +35,7 @@ export async function setupAudio(
 
 	try {
 		// Fetch the WebAssembly module that performs signal detection.
-		const response = await fetch("wasm_fft_analyzer_bg.wasm");
+		const response = await fetch(wasmUrl);
 
 		const wasmBytes = await response.arrayBuffer();
 		// Add our audio processor worklet to the context.

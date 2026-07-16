@@ -1,6 +1,6 @@
 {
 	"compilerOptions": {
-		"target": "ES2020",
+		"target": "es2025",
 		"useDefineForClassFields": true,
 		"lib": ["esnext", "DOM", "DOM.Iterable"],
 		"module": "ESNext",
@@ -17,7 +17,8 @@
 		"noUnusedLocals": true,
 		"noUnusedParameters": true,
 		"noFallthroughCasesInSwitch": true,
-		"allowJs": true
+		"allowJs": true,
+		"types": ["vite/client", "node", "audioworklet"],
 	},
 	"include": ["src", "types"],
 	"references": [

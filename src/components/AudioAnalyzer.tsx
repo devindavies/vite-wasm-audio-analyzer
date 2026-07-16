@@ -748,7 +748,7 @@ const AudioAnalyzer: React.FC = () => {
 					freq =
 						bands < 4
 							? nearestPreferred(freq)
-							: roundSD(freq, Number.parseInt(freq.toString()[0]) < 5 ? 3 : 2);
+							: roundSD(freq, Number.parseInt(freq.toString()[0], 10) < 5 ? 3 : 2);
 				else freq = roundSD(freq, 4, true);
 
 				if (freq >= minFreq)
@@ -2229,7 +2229,7 @@ const AudioAnalyzer: React.FC = () => {
 						onChange={(e) => {
 							audioNode.current?.port.postMessage({
 								type: "setMinFreq",
-								data: Number.parseInt(e.target.value),
+								data: Number.parseInt(e.target.value, 10),
 							});
 							calcBars();
 						}}
@@ -2257,7 +2257,7 @@ const AudioAnalyzer: React.FC = () => {
 						onChange={(e) => {
 							audioNode.current?.port.postMessage({
 								type: "setMaxFreq",
-								data: Number.parseInt(e.target.value),
+								data: Number.parseInt(e.target.value, 10),
 							});
 							calcBars();
 						}}
