@@ -9,6 +9,8 @@ export class FFTProcessor extends AudioWorkletProcessor {
 	maxFreq: number;
 	minFreq: number;
 	memory: WebAssembly.Memory | null;
+	// Reused view into WASM output memory — recreated only when WASM memory grows.
+	outputView: Float32Array | null;
 	//canvasPort?: MessagePort;
 
 	constructor() {
@@ -29,6 +31,7 @@ export class FFTProcessor extends AudioWorkletProcessor {
 		this.minFreq = 20;
 		this.maxFreq = 20000;
 		this.memory = null;
+		this.outputView = null;
 	}
 
 	onmessage(event: MessageEvent<WasmAudioEvent>) {
@@ -60,6 +63,7 @@ export class FFTProcessor extends AudioWorkletProcessor {
 				// for analysis at regular intervals.
 				this.samples = new Float32Array(numAudioSamplesPerAnalysis).fill(0);
 				this.totalSamples = 0;
+				this.outputView = null;
 				break;
 			}
 			case "setMinFreq": {
@@ -89,26 +93,20 @@ export class FFTProcessor extends AudioWorkletProcessor {
 			this.numAudioSamplesPerAnalysis &&
 			this.totalSamples < this.numAudioSamplesPerAnalysis
 		) {
-			for (const sampleValue of inputSamples) {
-				this.samples[this.totalSamples++] = sampleValue;
-			}
+			// set() copies 128 samples in a single native call — no iterator allocation.
+			this.samples.set(inputSamples, this.totalSamples);
+			this.totalSamples += inputSamples.length;
 		} else {
 			// Buffer is already full. We do not want the buffer to grow continually,
 			// so instead will "cycle" the samples through it so that it always
 			// holds the latest ordered samples of length equal to
 			// numAudioSamplesPerAnalysis.
-			// Shift the existing samples left by the length of new samples (128).
-			const numNewSamples = inputSamples.length;
-			const numExistingSamples = this.samples.length - numNewSamples;
-			for (let i = 0; i < numExistingSamples; i++) {
-				this.samples[i] = this.samples[i + numNewSamples];
-			}
-			// Add the new samples onto the end, into the 128-wide slot vacated by
-			// the previous copy.
-			for (let i = 0; i < numNewSamples; i++) {
-				this.samples[numExistingSamples + i] = inputSamples[i];
-			}
-			this.totalSamples += inputSamples.length;
+			// copyWithin + set are SIMD-accelerated native operations — no element-by-element loop.
+			// The AudioWorklet spec guarantees exactly 128 samples per process() call.
+			const numNewSamples = 128;
+			this.samples.copyWithin(0, numNewSamples);
+			this.samples.set(inputSamples, this.samples.length - numNewSamples);
+			this.totalSamples += numNewSamples;
 		}
 		// Once our buffer has enough samples, pass them to the Wasm signal detector.
 		if (
@@ -120,18 +118,22 @@ export class FFTProcessor extends AudioWorkletProcessor {
 			this.detector.analyze(this.samples, this.minFreq, this.maxFreq);
 
 			const outputPtr = this.detector.ouput();
-			const output = new Float32Array(
-				this.memory.buffer,
-				outputPtr,
-				this.numAudioSamplesPerAnalysis,
-			);
-
-			if (output.length !== 0) {
-				this.port.postMessage({
-					type: "signal",
-					data: output,
-				});
+			// Reuse the view into WASM output memory; recreate only when WASM memory
+			// grows (which reallocates memory.buffer).
+			if (this.outputView?.buffer !== this.memory.buffer) {
+				this.outputView = new Float32Array(
+					this.memory.buffer,
+					outputPtr,
+					this.numAudioSamplesPerAnalysis,
+				);
 			}
+			// Copy to a transferable buffer so postMessage uses zero-copy transfer
+			// instead of a structured clone across threads.
+			const transferBuffer = new Float32Array(this.outputView);
+			this.port.postMessage(
+				{ type: "signal", data: transferBuffer },
+				[transferBuffer.buffer],
+			);
 		}
 		// Returning true tells the Audio system to keep going.
 		return true;
