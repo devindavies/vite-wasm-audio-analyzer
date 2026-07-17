@@ -10,8 +10,8 @@
 		"includes": [
 			"**",
 			"!src/audio-processing/TextDecoder.js",
-			"!src/wasm-audio/**",
-			"!src/canvas-rendering/**",
+			"!src/wasm-audio",
+			"!src/canvas-rendering",
 			"!src/components/AudioController.tsx",
 			"!**/dist"
 		]

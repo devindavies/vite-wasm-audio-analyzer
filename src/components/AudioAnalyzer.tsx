@@ -43,6 +43,13 @@ const defaultWidth = 640;
 const defaultHeight = 270;
 const maxFPS = 60;
 
+// Module-level pure helpers — allocated once, not per frame
+const clamp = (val: number, min: number, max: number) =>
+	val <= min ? min : val >= max ? max : val;
+const dBToLinear = (val: number) => 10 ** (val / 20);
+const linearTodB = (value: number) => 20 * Math.log10(value);
+const EMPTY_LEDS: [number, number, number, number] = [0, 0, 0, 0];
+
 const AudioAnalyzer: React.FC = () => {
 	const [audio, setAudio] = useState<
 		{ context: AudioContext; node: RTANode } | undefined
@@ -161,6 +168,12 @@ const AudioAnalyzer: React.FC = () => {
 	const bars = useRef<AnalyzerBarData[]>([]);
 	const leds = useRef<[number, number, number, number]>([0, 0, 0, 0]);
 	const canvasGradients = useRef<CanvasGradient[]>([]);
+	const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+	const selectedGradsRef = useRef<string[]>([
+		`${GRADIENTS[0][0]}`,
+		`${GRADIENTS[0][0]}`,
+	]);
+	const weightedDataRef = useRef(new Float32Array(0));
 
 	const gradients = useMemo(() => {
 		const gradients: Record<string, Gradient> = {};
@@ -748,7 +761,7 @@ const AudioAnalyzer: React.FC = () => {
 					freq =
 						bands < 4
 							? nearestPreferred(freq)
-							: roundSD(freq, Number.parseInt(freq.toString()[0]) < 5 ? 3 : 2);
+							: roundSD(freq, Number.parseInt(freq.toString()[0], 10) < 5 ? 3 : 2);
 				else freq = roundSD(freq, 4, true);
 
 				if (freq >= minFreq)
@@ -1127,9 +1140,6 @@ const AudioAnalyzer: React.FC = () => {
 	const normalizedB = (value: number) => {
 		const isLinear = linearAmplitude;
 		const boost = isLinear ? 1 / linearBoost : 1;
-		const clamp = (val: number, min: number, max: number) =>
-			val <= min ? min : val >= max ? max : val;
-		const dBToLinear = (val: number) => 10 ** (val / 20);
 
 		let maxValue = maxDecibels;
 		let minValue = minDecibels;
@@ -1191,7 +1201,7 @@ const AudioAnalyzer: React.FC = () => {
 		const canvasR = canvasRRef.current;
 		const canvas = canvasRef.current;
 		if (!(canvasX && canvasR && canvas)) return;
-		const ctx = canvas.getContext("2d");
+		const ctx = ctxRef.current ?? canvas.getContext("2d");
 		if (!ctx) return;
 
 		const fadeFrames = (fps.current * peakFadeTime) / 1e3;
@@ -1211,7 +1221,7 @@ const AudioAnalyzer: React.FC = () => {
 		const maxBarHeight = radial ? outerRadius - innerRadius : analyzerHeight;
 		const nominalMaxHeight = maxBarHeight / pixelRatio.current; // for consistent gravity on lo-res or hi-dpi
 		const dbRange = maxDecibels - minDecibels;
-		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = leds.current || [];
+		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = leds.current ?? EMPTY_LEDS;
 
 		if (energy.current.val > 0 && fps.current > 0)
 			spinAngle.current += (spinSpeed * TAU) / 60 / fps.current; // spinSpeed * angle increment per frame for 1 RPM
@@ -1278,7 +1288,6 @@ const AudioAnalyzer: React.FC = () => {
 			const SQ158_5 = 25122.25;
 			const SQ737_9 = 544496.41;
 			const SQ12194 = 148693636;
-			const linearTodB = (value: number) => 20 * Math.log10(value);
 
 			switch (weightingFilter) {
 				case FILTER.A: {
@@ -1382,8 +1391,7 @@ const AudioAnalyzer: React.FC = () => {
 
 		const nBars = bars.current.length;
 		const nChannels = isSingle ? 1 : 2;
-		if (!gradientSelectRef.current) return;
-		const selectedGrads = gradientSelectRef.current?.value.split(",");
+		const selectedGrads = selectedGradsRef.current;
 
 		for (let channel = 0; channel < nChannels; channel++) {
 			const { channelTop, channelBottom, analyzerBottom } =
@@ -1558,12 +1566,13 @@ const AudioAnalyzer: React.FC = () => {
 				)
 					color = canvasGradients.current[channel];
 				else {
+					const ledBarValue = isLeds ? ledPosY(value) : 0;
 					const selectedIndex =
 						colorMode === COLOR_BAR_INDEX
 							? barIndex % colorCount
 							: colorStops.findLastIndex((item) =>
 									isLeds
-										? ledPosY(value) <= ledPosY(item.level)
+										? ledBarValue <= ledPosY(item.level)
 										: value <= item.level,
 								);
 					color = colorStops[selectedIndex].color;
@@ -1631,12 +1640,19 @@ const AudioAnalyzer: React.FC = () => {
 			} // if ( useCanvas )
 
 			// get a new array of data from the FFT
-			let fftData = signal;
+		let fftData: Float32Array | number[] = signal;
 
-			// apply weighting
-			if (weightingFilter)
-				fftData = fftData.map((val, idx) => val + weightingdB(binToFreq(idx)));
-
+		// apply weighting using a pre-allocated buffer to avoid per-frame allocations
+		if (weightingFilter) {
+			const sampleRate = audioCtx.current?.sampleRate ?? 48000;
+			const len = signal.length;
+			if (weightedDataRef.current.length !== len)
+				weightedDataRef.current = new Float32Array(len);
+			const weighted = weightedDataRef.current;
+			for (let i = 0; i < len; i++)
+				weighted[i] = (signal[i] as number) + weightingdB((i * sampleRate) / fftSize || 1);
+			fftData = weighted;
+		}
 			// start drawing path (for graph mode)
 			ctx.beginPath();
 
@@ -2011,6 +2027,7 @@ const AudioAnalyzer: React.FC = () => {
 			const scaleX = canvasXRef.current.getContext("2d");
 			const ctx = canvasRef.current.getContext("2d");
 			if (scaleX && ctx) {
+				ctxRef.current = ctx;
 				setCanvas({
 					reason: REASON.CREATE,
 					ready: true,
@@ -2199,7 +2216,10 @@ const AudioAnalyzer: React.FC = () => {
 						id="gradient"
 						defaultValue={`${GRADIENTS[0][0]},${GRADIENTS[0][0]}`}
 						ref={gradientSelectRef}
-						onChange={() => makeGrad()}
+						onChange={(e) => {
+							selectedGradsRef.current = e.target.value.split(",");
+							makeGrad();
+						}}
 					>
 						<option value={`${GRADIENTS[0][0]},${GRADIENTS[0][0]}`}>
 							Classic
@@ -2229,7 +2249,7 @@ const AudioAnalyzer: React.FC = () => {
 						onChange={(e) => {
 							audioNode.current?.port.postMessage({
 								type: "setMinFreq",
-								data: Number.parseInt(e.target.value),
+								data: Number.parseInt(e.target.value, 10),
 							});
 							calcBars();
 						}}
@@ -2257,7 +2277,7 @@ const AudioAnalyzer: React.FC = () => {
 						onChange={(e) => {
 							audioNode.current?.port.postMessage({
 								type: "setMaxFreq",
-								data: Number.parseInt(e.target.value),
+								data: Number.parseInt(e.target.value, 10),
 							});
 							calcBars();
 						}}
