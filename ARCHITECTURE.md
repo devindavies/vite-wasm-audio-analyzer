@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This document serves as a critical, living reference designed to equip agents and engineers with a rapid and comprehensive understanding of the codebase's architecture. Update this document as the codebase evolves.
+This document serves as a critical, living reference designed to equip agents and engineers with a rapid and comprehensive understanding of the codebase's architecture. Update this document as the codebase evolves. For agent behavior rules (workflow, guardrails, commit conventions, tool preferences), see [AGENTS.md](./AGENTS.md).
 
 ## 1. Project Structure
 
@@ -10,7 +10,7 @@ vite-wasm-audio-analyzer/
 │   ├── components/            # React UI components (AudioAnalyzer, AudioController)
 │   ├── audio-processing/      # AudioWorklet processor (FFT + WASM integration)
 │   ├── canvas-rendering/      # Canvas Web Worker infrastructure (built, not yet wired in)
-│   ├── utils/                 # Audio setup, canvas setup, frequency mapping utilities
+│   ├── utils/                 # Audio setup (setupAudio, RTANode), AudioAnalyzer options/validation, canvas setup, frequency mapping
 │   ├── constants/             # Band presets, gradients, default settings, math constants
 │   ├── types/                 # TypeScript type definitions for audio, events, and display
 │   └── assets/                # Static image assets
@@ -18,6 +18,8 @@ vite-wasm-audio-analyzer/
 ├── .github/
 │   ├── workflows/             # GitHub Actions CI (CodeQL security scan)
 │   └── dependabot.yml         # Weekly npm dependency updates
+├── openspec/                  # OpenSpec config (config.yaml), specs, and change proposals
+├── .agents/, .claude/         # Agent skill definitions
 ├── biome.json                 # Linter and formatter configuration
 ├── vite.config.ts             # Vite build config (Rolldown, WASM copy, Tailwind)
 ├── tsconfig.json              # TypeScript strict mode config
@@ -57,11 +59,11 @@ vite-wasm-audio-analyzer/
 
 **Description:** A browser-only single-page application that performs real-time audio frequency analysis and visualization. The user grants microphone access or connects an `HTMLMediaElement`; the app captures and routes audio through the Web Audio API, processes it via a WASM FFT AudioWorklet, and renders a live spectrum display on a main-thread canvas using `requestAnimationFrame`.
 
-**Technologies:** React 19, TypeScript 5.8.3, Vite (Rolldown 7), Tailwind CSS 4, Web Audio API, WebAssembly, Web Workers
+**Technologies:** React 19, TypeScript 6, Vite (Rolldown 7), Tailwind CSS 4, Web Audio API, WebAssembly, Web Workers
 
 **Key Entry Point:** `App.tsx` → `AudioAnalyzer.tsx` (the sole mounted component)
 
-**Deployment:** Static SPA — no server required. Likely Vercel based on `@vercel/analytics` and `@vercel/speed-insights` dependencies.
+**Deployment:** Static SPA on Vercel (https://vite-wasm-audio-analyzer.vercel.app/) — no server required.
 
 ---
 
@@ -134,13 +136,13 @@ vite-wasm-audio-analyzer/
 
 ## 6. Deployment & Infrastructure
 
-**Cloud Provider:** Vercel (inferred from `@vercel/analytics` and `@vercel/speed-insights` dependencies)
+**Cloud Provider:** Vercel
 
-**Key Services Used:** <!-- TODO: fill in — confirm Vercel project name and domain -->
+**Key Services Used:** Vercel static hosting, Analytics, Speed Insights — https://vite-wasm-audio-analyzer.vercel.app/
 
 **CI/CD Pipeline:** GitHub Actions — `.github/workflows/codeql.yml` runs CodeQL security analysis on push/PR to `main` and on a weekly schedule (Wednesdays)
 
-**Dependency Management:** Dependabot — weekly npm updates targeting the repo root
+**Dependency Management:** Dependabot — weekly updates for npm and GitHub Actions
 
 **Monitoring & Logging:** Vercel Analytics (page metrics) + Vercel Speed Insights (Core Web Vitals). No server-side logging — this is a purely client-side app.
 
@@ -156,7 +158,7 @@ vite-wasm-audio-analyzer/
 
 **Browser Permissions:** Microphone access via `getUserMedia()` — requires explicit user permission grant. Permission errors (`NotAllowedError`, `NotFoundError`) are caught and surfaced with user-friendly messages in `src/utils/getWebAudioMediaStream.ts`.
 
-**Key Security Tools / Practices:** CodeQL static analysis via GitHub Actions (JavaScript/TypeScript). Dependabot for weekly npm vulnerability patching.
+**Key Security Tools / Practices:** CodeQL static analysis via GitHub Actions (JavaScript/TypeScript). Dependabot for weekly npm and GitHub Actions updates.
 
 ---
 
@@ -173,7 +175,7 @@ npm run lint       # Biome linter
 
 **Testing Frameworks:** None — no automated test suite is currently configured.
 
-**Code Quality Tools:** [Biome 2.1.2](biome.json) — combined linter and formatter with VCS integration. Key rules enforce: no barrel files, no re-export-all, top-level regex, exhaustive React hook dependencies, and JSX key in iterables. `canvas-rendering/` and `AudioController.tsx` are excluded from linting (in-progress code).
+**Code Quality Tools:** [Biome 2.5](biome.json) — combined linter and formatter with VCS integration. Key rules enforce: no barrel files, no re-export-all, top-level regex, exhaustive React hook dependencies, and JSX key in iterables. `canvas-rendering/` and `AudioController.tsx` are excluded from linting (in-progress code).
 
 ---
 
@@ -181,12 +183,6 @@ npm run lint       # Biome linter
 
 - <!-- TODO: fill in planned architectural changes -->
 - <!-- TODO: fill in known technical debt affecting architecture -->
-
----
-
-## System Architecture
-
-For agent behavior rules (workflow, guardrails, commit conventions, tool preferences), see [AGENTS.md](./AGENTS.md).
 
 ---
 
@@ -198,7 +194,7 @@ For agent behavior rules (workflow, guardrails, commit conventions, tool prefere
 
 **Primary Contact / Team:** devindavies
 
-**Date of Last Update:** 2026-07-15
+**Date of Last Update:** 2026-11-23
 
 ---
 

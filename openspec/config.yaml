@@ -2,33 +2,84 @@ schema: spec-driven
 githubCopilot:
   cloudAgent: false
 
-# Project context (optional)
-# Add only constraints that should guide OpenSpec artifacts and workflows.
-# Include constraints an agent cannot infer by reading the code.
-# Keep general project documentation and discoverable codebase facts out.
-# Example:
-#   context: |
-#     Designs and tasks must cover Windows, macOS, and Linux
-#     Write all artifacts in Spanish
+# Project Context
+# Injected into every AI-generated artifact. Facts only, no opinions.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always state what is out of scope
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+context: |
+  ## Project Identity
+  vite-wasm-audio-analyzer: browser-only SPA for real-time audio frequency analysis and visualization.
+  Single package (no workspaces). Vite (rolldown-vite 7.0.11) builds; npm scripts only.
+  Package manager: npm (package-lock.json), no private registries.
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+  ## Tech Stack
+  - Runtime:            Node 22.17.0 (dev tooling); browser target
+  - Language:           TypeScript 6, strict, noUnusedLocals/Parameters, isolatedModules, target es2025, moduleResolution bundler
+  - Framework:          React 19.2 (react-jsx, @vitejs/plugin-react-oxc)
+  - Key Libraries:      WASM FFT analyzer package ^0.6.0, Tailwind CSS 4.3, @vercel/analytics, @vercel/speed-insights
+  - Data Layer:         None; audio data is Float32Array streams
+  - Testing:            None configured
+  - Linting/Formatting: Biome 2.5 (npm run lint); excludes TextDecoder.js, src/wasm-audio, src/canvas-rendering, AudioController.tsx, dist
+  - Build Tools:        Vite via rolldown-vite, WASM loaded via ?url + fetch
+  - CI/CD:              GitHub Actions CodeQL (push/PR to main + weekly); Dependabot weekly (npm, actions); hosted on Vercel
+  - Versioning:         package.json version only; no changesets or CHANGELOG
+
+  ## Architecture Patterns
+  - Organisation: layer-based under src/ (components, utils, types, constants, audio-processing, canvas-rendering)
+  - Shared code:  src/utils, src/types, src/constants
+  - Path aliases: none; relative imports
+  - Key patterns: AudioWorklet (FFTProcessor) -> RTANode (AudioWorkletNode) -> main-thread rAF draw loop on 2D canvas; message-based worklet coordination; React hooks + class-based analyzer
+
+  ## Domain Concepts
+  - Band / frequency scale: FrequencyScale presets mapping FFT bins to display bars
+  - FFT size: default 8192; worklet processes 128-sample render quanta into buffered windows
+  - RTANode: AudioWorkletNode wrapper delivering analysis frames to the main thread
+  - Canvas worker: OffscreenCanvas infrastructure, built but not wired in
+  # TODO: fill in other domain terms
+
+  ## Performance Targets
+  - Frame rate: 60 fps cap in the React analyzer (16.67 ms frame budget)
+  - Hot paths: FFTProcessor.process (every 128-sample quantum), rAF draw loop
+  # TODO: fill in bundle size and memory targets
+
+  ## Code Patterns
+  - Exports:         mixed; named for classes/helpers/types/constants, default for React components
+  - Naming:          PascalCase classes/components/types; camelCase vars/functions/files; UPPER_SNAKE_CASE constants
+  - Error handling:  throw Error/AudioMotionError; manual validation, no schema library
+  - Types:           prefer type aliases; some existing enums (FrequencyScale, CHANNEL_LAYOUT)
+  - Docs:            JSDoc on utils/AudioAnalyzer.ts; lighter elsewhere
+
+  ## Testing Patterns
+  - No automated tests or tsc --noEmit script/CI step exist.
+  # TODO: fill in intended testing approach
+
+  ## Code Anti-Patterns
+  - Introducing OffscreenCanvas into AudioAnalyzer.tsx (tracked as separate future work)
+  - Placing try/catch or allocations in FFTProcessor.process / draw loop hot paths
+  - Emulating legacy inconsistencies (e.g. canvas_worker naming, new enums)
+
+rules:
+  proposal:
+    - State the requirement or ticket driving this change
+    - Define scope boundaries, listing what is OUT of scope
+    - Keep under 100 lines
+    - Flag changes to the audio pipeline (FFTProcessor, RTANode, setupAudio) and any breaking API change
+  design:
+    - "Required sections in order: Current State, Desired End State, Patterns to Follow (only if specific), Patterns to Avoid (only if specific), Open Questions, Resolved Decisions"
+    - Use ASCII diagrams for data flows and thread boundaries (main thread vs AudioWorklet)
+    - State performance implications for worklet and rAF paths
+    - Keep under 250 lines
+  tasks:
+    - Order as vertical slices, each delivering a testable end-to-end path
+    - 'Each task includes a "Test:" line, which may be manual or npm run lint and npm run build'
+    - Max 2 hours per task; prefer 3-5 slices
+    - Call out inter-task dependencies explicitly
+    # TODO: fill in task tag scheme
+  specs:
+    - Use Given/When/Then
+    - Include concrete example data (sample rate, FFT size, band count)
+    - Document edge cases explicitly (e.g. buffer underrun, low sample rates)
+
+# Related Documentation
+# - ARCHITECTURE.md: System overview, components, data flows
+# - AGENTS.md: Agent behavior rules and workflow procedures
+# - README.md: Quick start and local dev setup
