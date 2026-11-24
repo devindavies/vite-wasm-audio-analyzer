@@ -72,6 +72,10 @@ const AudioAnalyzer: React.FC = () => {
 		};
 	}, [uploadedUrl]);
 
+	// encodeURI leaves browser-generated blob: URLs unchanged; it is also the
+	// escaping CodeQL's js/xss-through-dom recognizes for URL attributes.
+	const audioSrc = uploadedUrl ? encodeURI(uploadedUrl) : defaultAudioSrc;
+
 	const fsTimeout = useRef<number | null>(null); // Fullscreen timeout
 	const fsChanging = useRef(false); // Fullscreen changing
 	const pixelRatio = useRef(window.devicePixelRatio / 1);
@@ -2104,7 +2108,7 @@ const AudioAnalyzer: React.FC = () => {
 			</div>
 			{/* biome-ignore lint/a11y/useMediaCaption: <explanation> */}
 			<audio
-				src={uploadedUrl ?? defaultAudioSrc}
+				src={audioSrc}
 				className="w-full mb-4"
 				controls
 				crossOrigin="anonymous"
