@@ -1,6 +1,7 @@
 import {
 	useCallback,
 	useEffect,
+	useEffectEvent,
 	useLayoutEffect,
 	useMemo,
 	useRef,
@@ -35,23 +36,159 @@ import type { Gradient } from "../types/Gradient";
 import setCanvas from "../utils/canvas/setCanvas";
 import { findY } from "../utils/findY";
 import { magnitudesToDb } from "../utils/magnitudesToDb";
-import type RTANode from "../utils/RTANode";
 import { setupAudio } from "../utils/setupAudio";
+import { setupAudioAnalyser } from "../utils/setupAudioAnalyser";
 
 type Mode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10;
 
 const defaultWidth = 640;
 const defaultHeight = 270;
-const maxFPS = 60;
+const fpsMax = 60;
+const TARGET_INTERVAL = fpsMax ? 975 / fpsMax : 0; // small tolerance for best results
 const defaultAudioSrc =
 	"https://audio-edge-qse4n.yyz.g.radiomast.io/8a384ff3-6fd1-4e5d-b47d-0cbefeffe8d7";
 
+const DASH_EVEN = [2, 4];
+const DASH_ODD = [2, 8];
+const NO_DASH: number[] = [];
+
+const FREQUENCY_SCALES = new Set<string>(Object.values(FrequencyScale));
+
+/**
+ * Reads the frequency-scale `<select>` and narrows its value to a known `FrequencyScale`.
+ * @param el - The frequency-scale select element, or null before mount.
+ * @returns The selected scale, or `FrequencyScale.LOG` when the element is missing or holds an unknown value.
+ */
+const readFrequencyScale = (el: HTMLSelectElement | null): FrequencyScale => {
+	const value = el?.value ?? "";
+	return FREQUENCY_SCALES.has(value)
+		? (value as FrequencyScale)
+		: FrequencyScale.LOG;
+};
+
+/** Clamps `val` to the inclusive range [0, 1]. */
+const clamp01 = (val: number) => (val <= 0 ? 0 : Math.min(val, 1));
+/** Converts decibels to a linear amplitude ratio (10^(dB/20)). */
+const dBToLinear = (val: number) => 10 ** (val / 20);
+
+/**
+ * Builds a function that maps a dB value into the [0, 1] range for bar heights.
+ * @param isLinear - Map on a linear amplitude scale instead of a dB scale.
+ * @param linearBoost - Exponent divisor applied in linear mode; values > 1 boost low amplitudes.
+ * @param dbMax - Level (dB) that maps to 1.
+ * @param dbMin - Level (dB) that maps to 0.
+ * @returns A normalizer that clamps its output to [0, 1].
+ */
+const makeNormalizer = (
+	isLinear: boolean,
+	linearBoost: number,
+	dbMax: number,
+	dbMin: number,
+) => {
+	const boost = isLinear ? 1 / linearBoost : 1;
+	const valueMax = isLinear ? dBToLinear(dbMax) : dbMax;
+	const valueMin = isLinear ? dBToLinear(dbMin) : dbMin;
+	const denom = (valueMax - valueMin) ** boost;
+	return isLinear
+		? (value: number) =>
+				clamp01((dBToLinear(value) ** boost - valueMin) / denom)
+		: (value: number) => clamp01((value - valueMin) / denom);
+};
+
+/**
+ * Returns the gain (dB) of a frequency-weighting filter at a given frequency.
+ * @param freq - Frequency in Hz.
+ * @param filter - Weighting curve (A, B, C, D, or ITU-R 468).
+ * @returns Gain in dB, normalized to ~0 dB at 1 kHz; 0 for `FILTER.NONE` or an unrecognized filter.
+ */
+const weightingdB = (freq: number, filter: FILTER) => {
+	const f2 = freq ** 2;
+	const SQ20_6 = 424.36;
+	const SQ107_7 = 11599.29;
+	const SQ158_5 = 25122.25;
+	const SQ737_9 = 544496.41;
+	const SQ12194 = 148693636;
+	const linearTodB = (value: number) => 20 * Math.log10(value);
+
+	switch (filter) {
+		case FILTER.A: {
+			// A-weighting https://en.wikipedia.org/wiki/A-weighting
+			const rA =
+				(SQ12194 * f2 ** 2) /
+				((f2 + SQ20_6) *
+					Math.sqrt((f2 + SQ107_7) * (f2 + SQ737_9)) *
+					(f2 + SQ12194));
+			return 2 + linearTodB(rA);
+		}
+
+		case FILTER.B: {
+			const rB =
+				(SQ12194 * f2 * freq) /
+				((f2 + SQ20_6) * Math.sqrt(f2 + SQ158_5) * (f2 + SQ12194));
+			return 0.17 + linearTodB(rB);
+		}
+
+		case FILTER.C: {
+			const rC = (SQ12194 * f2) / ((f2 + SQ20_6) * (f2 + SQ12194));
+			return 0.06 + linearTodB(rC);
+		}
+
+		case FILTER.D: {
+			const h =
+				((1037918.48 - f2) ** 2 + 1080768.16 * f2) /
+				((9837328 - f2) ** 2 + 11723776 * f2);
+			const rD =
+				(freq / 6.8966888496476e-5) *
+				Math.sqrt(h / ((f2 + 79919.29) * (f2 + 1345600)));
+			return linearTodB(rD);
+		}
+
+		case FILTER.FOUR_SIX_EIGHT: {
+			// ITU-R 468 https://en.wikipedia.org/wiki/ITU-R_468_noise_weighting
+			const h1 =
+				-4.737338981378384e-24 * freq ** 6 +
+				2.043828333606125e-15 * freq ** 4 -
+				1.363894795463638e-7 * f2 +
+				1;
+			const h2 =
+				1.306612257412824e-19 * freq ** 5 -
+				2.118150887518656e-11 * freq ** 3 +
+				5.559488023498642e-4 * freq;
+			const rI = (1.246332637532143e-4 * freq) / Math.hypot(h1, h2);
+			return 18.2 + linearTodB(rI);
+		}
+	}
+
+	return 0; // unknown filter
+};
+
+/**
+ * Real-time spectrum analyzer that renders FFT data from an AudioWorklet onto a canvas.
+ *
+ * @returns The analyzer canvas, audio player, start/pause control, file upload, and settings selectors.
+ *
+ * @remarks
+ * Audio is set up only after the user clicks "Start listening", to satisfy browser autoplay policy.
+ * It plays `defaultAudioSrc` until the user uploads a file. Most visual options (LEDs, reflex,
+ * mirror, peaks, etc.) are held in state with defaults and are not yet exposed as controls.
+ * Rendering logic is adapted from audioMotion-analyzer.
+ *
+ * @example
+ * ```tsx
+ * import AudioAnalyzer from "./components/AudioAnalyzer";
+ *
+ * export const App = () => <AudioAnalyzer />;
+ * ```
+ */
+/** The only part of the analysis node the UI uses: posting frequency-range updates. */
+type AnalysisNode = { port: { postMessage(message: unknown): void } };
+
 const AudioAnalyzer: React.FC = () => {
 	const [audio, setAudio] = useState<
-		{ context: AudioContext; node: RTANode } | undefined
+		{ context: AudioContext; node: AnalysisNode } | undefined
 	>(undefined);
 	const audioCtx = useRef<AudioContext | undefined>(undefined);
-	const audioNode = useRef<RTANode | undefined>(undefined);
+	const audioNode = useRef<AnalysisNode | undefined>(undefined);
 
 	const [running, setRunning] = useState(false);
 	const [isFullscreen, setIsFullscreen] = useState(false);
@@ -65,10 +202,13 @@ const AudioAnalyzer: React.FC = () => {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const audioRef = useRef<HTMLAudioElement>(null);
 	const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+	const [audioError, setAudioError] = useState("");
 
 	useEffect(() => {
 		return () => {
-			if (uploadedUrl) URL.revokeObjectURL(uploadedUrl);
+			if (uploadedUrl) {
+				URL.revokeObjectURL(uploadedUrl);
+			}
 		};
 	}, [uploadedUrl]);
 
@@ -118,10 +258,12 @@ const AudioAnalyzer: React.FC = () => {
 		noLedGap: false,
 	});
 
-	const minFreqRef = useRef<HTMLSelectElement | null>(null);
-	const maxFreqRef = useRef<HTMLSelectElement | null>(null);
+	const freqMinRef = useRef<HTMLSelectElement | null>(null);
+	const freqMaxRef = useRef<HTMLSelectElement | null>(null);
 
 	const frequencyScaleRef = useRef<HTMLSelectElement | null>(null);
+	// Visual settings below are held in state so planned UI controls can drive them;
+	// most setters are intentionally unused until those controls are added.
 	const [channelLayout, setChannelLayout] = useState<CHANNEL_LAYOUT>(
 		CHANNEL_LAYOUT.SINGLE,
 	);
@@ -140,7 +282,8 @@ const AudioAnalyzer: React.FC = () => {
 	const [radialInvert, setRadialInvert] = useState(false);
 	const [radius, setRadius] = useState(0.3);
 	const [barSpace, setBarSpace] = useState(0.1);
-	const [fftSize, setFftSize] = useState(8192); //TODO: make this configurable
+	// TODO: expose FFT size as a control; setFftSize is currently unused and the RTANode FFT size must change in step.
+	const [fftSize, setFftSize] = useState(8192);
 	const [peakFadeTime, setPeakFadeTime] = useState(750);
 	const [peakHoldTime, setPeakHoldTime] = useState(500);
 	const [peakLine, setPeakLine] = useState(false);
@@ -176,10 +319,16 @@ const AudioAnalyzer: React.FC = () => {
 	const bars = useRef<AnalyzerBarData[]>([]);
 	const leds = useRef<[number, number, number, number]>([0, 0, 0, 0]);
 	const canvasGradients = useRef<CanvasGradient[]>([]);
+	const weightingTable = useRef(new Float64Array(0));
+	const weightingKey = useRef({
+		filter: FILTER.NONE,
+		fftSize: 0,
+		sampleRate: 0,
+		bins: 0,
+	});
 
 	const gradients = useMemo(() => {
 		const gradients: Record<string, Gradient> = {};
-		const selectedGrads = gradientSelectRef.current?.value.split(",") || [];
 		const registerGradient = (name: string, options: BaseGradient[1]) => {
 			const { colorStops } = options;
 
@@ -187,14 +336,8 @@ const AudioAnalyzer: React.FC = () => {
 			const isInvalid = (val: number | undefined) =>
 				val === undefined || val < 0 || val > 1;
 
-			let newColorStops: {
-				pos: number;
-				color: string;
-				level: number;
-			}[] = [];
-
 			// normalize all colorStops as objects with `pos`, `color` and `level` properties
-			newColorStops = colorStops.map((colorStop, index) => ({
+			const newColorStops = colorStops.map((colorStop, index) => ({
 				pos:
 					typeof colorStop === "string" ||
 					isInvalid(colorStop.pos) ||
@@ -222,15 +365,20 @@ const AudioAnalyzer: React.FC = () => {
 			};
 		};
 		// Register built-in gradients
-		for (const [name, options] of GRADIENTS) registerGradient(name, options);
+		for (const [name, options] of GRADIENTS) {
+			registerGradient(name, options);
+		}
 
 		return gradients;
 	}, []);
 
+	// Rebuilds the per-channel CanvasGradients (stored in canvasGradients) for the current layout and canvas size.
 	const makeGrad = useCallback(() => {
 		const canvas = canvasRef.current;
 		const ctx = canvas?.getContext("2d");
-		if (!(canvas && ctx)) return;
+		if (!(canvas && ctx)) {
+			return;
+		}
 
 		const {
 			analyzerWidth,
@@ -243,20 +391,24 @@ const AudioAnalyzer: React.FC = () => {
 		const { isLumi } = flg.current;
 		const isDualVertical = channelLayout === CHANNEL_LAYOUT.DUAL_VERTICAL;
 		const analyzerRatio = 1 - reflexRatio;
+		// for vertical stereo we keep the full canvas height and handle the reflex areas while generating the color stops
 		const gradientHeight = isLumi
 			? canvas.height
-			: (canvas.height * (1 - reflexRatio * Number(!isDualVertical))) | 0;
-		// for vertical stereo we keep the full canvas height and handle the reflex areas while generating the color stops
+			: Math.trunc(canvas.height * (1 - reflexRatio * Number(!isDualVertical)));
 		const selectedGrads = gradientSelectRef.current?.value.split(",") || [];
 
 		for (const channel of [0, 1]) {
-			const currGradient = gradients[selectedGrads[channel]];
+			const currGradient =
+				gradients[selectedGrads[channel] ?? ""] ?? gradients[GRADIENTS[0][0]];
+			if (!currGradient) {
+				continue;
+			}
 			const colorStops = currGradient.colorStops;
 			const isHorizontal = currGradient.dir === "h";
 
 			let grad: CanvasGradient;
 
-			if (radial)
+			if (radial) {
 				grad = ctx.createRadialGradient(
 					centerX,
 					centerY,
@@ -265,7 +417,7 @@ const AudioAnalyzer: React.FC = () => {
 					centerY,
 					innerRadius - (outerRadius - innerRadius) * Number(isDualVertical),
 				);
-			else
+			} else {
 				grad = ctx.createLinearGradient(
 					...(isHorizontal
 						? ([initialX, 0, initialX + analyzerWidth, 0] as [
@@ -276,65 +428,64 @@ const AudioAnalyzer: React.FC = () => {
 							])
 						: ([0, 0, 0, gradientHeight] as [number, number, number, number])),
 				);
-
-			if (colorStops) {
-				const dual =
-					isDualVertical && !splitGradient && (!isHorizontal || radial);
-
-				for (
-					let channelArea = 0;
-					channelArea < 1 + Number(dual);
-					channelArea++
-				) {
-					const maxIndex = colorStops.length - 1;
-
-					colorStops.forEach((item, index) => {
-						let colorStop = item;
-						let offset = colorStop.pos;
-
-						// in dual mode (not split), use half the original offset for each channel
-						if (dual) offset /= 2;
-
-						// constrain the offset within the useful analyzer areas (avoid reflex areas)
-						if (isDualVertical && !isLumi && !radial && !isHorizontal) {
-							offset *= analyzerRatio;
-							// skip the first reflex area in split mode
-							if (!dual && offset > 0.5 * analyzerRatio)
-								offset += 0.5 * reflexRatio;
-						}
-
-						// only for dual-vertical non-split gradient (creates full gradient on both halves of the canvas)
-						if (channelArea === 1) {
-							// add colors in reverse order if radial or lumi are active
-							if (radial || isLumi) {
-								const revIndex = maxIndex - index;
-								colorStop = colorStops[revIndex];
-								offset = 1 - colorStop.pos / 2;
-							} else {
-								// if the first offset is not 0, create an additional color stop to prevent bleeding from the first channel
-								if (index === 0 && offset > 0)
-									grad.addColorStop(0.5, colorStop.color);
-								// bump the offset to the second half of the gradient
-								offset += 0.5;
-							}
-						}
-
-						// add gradient color stop
-						grad.addColorStop(offset, colorStop.color);
-
-						// create additional color stop at the end of first channel to prevent bleeding
-						if (isDualVertical && index === maxIndex && offset < 0.5)
-							grad.addColorStop(0.5, colorStop.color);
-					});
-				} // for ( let channelArea = 0; channelArea < 1 + dual; channelArea++ )
 			}
+
+			const dual =
+				isDualVertical && !splitGradient && (!isHorizontal || radial);
+			const constrainToAnalyzer =
+				isDualVertical && !isLumi && !radial && !isHorizontal;
+			const indexMax = colorStops.length - 1;
+
+			for (let channelArea = 0; channelArea < 1 + Number(dual); channelArea++) {
+				colorStops.forEach((item, index) => {
+					let colorStop = item;
+					let offset = colorStop.pos;
+
+					// in dual mode (not split), use half the original offset for each channel
+					if (dual) {
+						offset /= 2;
+					}
+
+					// constrain the offset within the useful analyzer areas (avoid reflex areas)
+					if (constrainToAnalyzer) {
+						offset *= analyzerRatio;
+					}
+					// skip the first reflex area in split mode
+					if (constrainToAnalyzer && !dual && offset > 0.5 * analyzerRatio) {
+						offset += 0.5 * reflexRatio;
+					}
+
+					// only for dual-vertical non-split gradient (creates full gradient on both halves of the canvas)
+					// add colors in reverse order if radial or lumi are active
+					if (channelArea === 1 && (radial || isLumi)) {
+						colorStop = colorStops[indexMax - index];
+						offset = 1 - colorStop.pos / 2;
+					} else if (channelArea === 1) {
+						// if the first offset is not 0, create an additional color stop to prevent bleeding from the first channel
+						if (index === 0 && offset > 0) {
+							grad.addColorStop(0.5, colorStop.color);
+						}
+						// bump the offset to the second half of the gradient
+						offset += 0.5;
+					}
+
+					// add gradient color stop
+					grad.addColorStop(offset, colorStop.color);
+
+					// create additional color stop at the end of first channel to prevent bleeding
+					if (isDualVertical && index === indexMax && offset < 0.5) {
+						grad.addColorStop(0.5, colorStop.color);
+					}
+				});
+			} // end channelArea loop
 
 			canvasGradients.current[channel] = grad;
 		} // for ( const channel of [0,1] )
 	}, [channelLayout, radial, reflexRatio, splitGradient, gradients]);
 
+	// Maps a frequency (Hz) to position units on the selected scale (log2 Hz, Bark, log2-based Mel, or linear Hz).
 	const freqScaling = useCallback((freq: number) => {
-		switch (frequencyScaleRef.current?.value as FrequencyScale) {
+		switch (readFrequencyScale(frequencyScaleRef.current)) {
 			case FrequencyScale.LOG:
 				return Math.log2(freq);
 			case FrequencyScale.BARK:
@@ -347,12 +498,12 @@ const AudioAnalyzer: React.FC = () => {
 	}, []);
 
 	const freqToBin = useCallback(
-		(freq: number, method: "floor" | "round" = "round") => {
+		(freq: number, method: "floor" | "round") => {
 			const max = fftSize / 2 - 1;
 			const bin = Math[method](
 				(freq * fftSize) / (audioCtx.current?.sampleRate || 48000),
 			);
-			return bin < max ? bin : max;
+			return Math.min(bin, max);
 		},
 		[fftSize],
 	);
@@ -364,9 +515,11 @@ const AudioAnalyzer: React.FC = () => {
 		[fftSize],
 	);
 
+	// Pre-renders the X-axis and radial frequency labels onto the hidden scaleX/scaleR canvases (blitted each frame by draw).
 	const createScales = useCallback(() => {
-		if (!(canvasRef.current && canvasXRef.current && canvasRRef.current))
+		if (!(canvasRef.current && canvasXRef.current && canvasRRef.current)) {
 			return;
+		}
 
 		const { analyzerWidth, initialX, innerRadius, scaleMin, unitWidth } =
 			aux.current;
@@ -376,12 +529,14 @@ const AudioAnalyzer: React.FC = () => {
 		const canvasR = canvasRRef.current;
 		const scaleR = canvasR.getContext("2d");
 		const canvas = canvasRef.current;
-		if (!(scaleX && scaleR)) return;
+		if (!(scaleX && scaleR)) {
+			return;
+		}
 
 		const freqLabels: (number | [number, string])[] = [];
 		const isDualHorizontal = channelLayout === CHANNEL_LAYOUT.DUAL_HORIZONTAL;
 		const isDualVertical = channelLayout === CHANNEL_LAYOUT.DUAL_VERTICAL;
-		const minDimension = Math.min(canvas.width, canvas.height);
+		const dimensionMin = Math.min(canvas.width, canvas.height);
 		const scale = [
 			"C",
 			undefined,
@@ -396,32 +551,36 @@ const AudioAnalyzer: React.FC = () => {
 			undefined,
 			"B",
 		]; // for note labels (no sharp notes)
-		const scaleHeight = (minDimension / 34) | 0; // circular scale height (radial mode)
+		const scaleHeight = Math.trunc(dimensionMin / 34); // circular scale height (radial mode)
 		const fontSizeX = canvasX.height >> 1;
 		const fontSizeR = scaleHeight >> 1;
 		const labelWidthX = fontSizeX * (noteLabels ? 0.7 : 1.5);
 		const labelWidthR = fontSizeR * (noteLabels ? 1 : 2);
 		const root12 = 2 ** (1 / 12);
-		const minFreq = Number(minFreqRef.current?.value) || 20;
-		const maxFreq = Number(maxFreqRef.current?.value) || 20000;
-		const frequencyScale = frequencyScaleRef.current?.value as FrequencyScale;
+		const freqMin = Number(freqMinRef.current?.value) || 20;
+		const freqMax = Number(freqMaxRef.current?.value) || 20000;
+		const frequencyScale = readFrequencyScale(frequencyScaleRef.current);
 
 		if (!noteLabels && (ansiBands || frequencyScale !== FrequencyScale.LOG)) {
 			freqLabels.push(16, 31.5, 63, 125, 250, 500, 1e3, 2e3, 4e3);
-			if (frequencyScale === FrequencyScale.LINEAR)
+			if (frequencyScale === FrequencyScale.LINEAR) {
 				freqLabels.push(6e3, 8e3, 10e3, 12e3, 14e3, 16e3, 18e3, 20e3, 22e3);
-			else freqLabels.push(8e3, 16e3);
+			} else {
+				freqLabels.push(8e3, 16e3);
+			}
 		} else {
 			let freq = C_1;
 			for (let octave = -1; octave < 11; octave++) {
 				for (let note = 0; note < 12; note++) {
-					if (freq >= minFreq && freq <= maxFreq) {
-						const pitch = scale[note];
-						const isC = pitch === "C";
-						if ((pitch && noteLabels && !mirror && !isDualHorizontal) || isC)
-							freqLabels.push(
-								noteLabels ? [freq, pitch + (isC ? octave : "")] : freq,
-							);
+					const pitch = scale[note];
+					const isC = pitch === "C";
+					const isInRange = freq >= freqMin && freq <= freqMax;
+					const isLabeled =
+						(pitch && noteLabels && !mirror && !isDualHorizontal) || isC;
+					if (isInRange && isLabeled) {
+						freqLabels.push(
+							noteLabels ? [freq, pitch + (isC ? octave : "")] : freq,
+						);
 					}
 					freq *= root12;
 				}
@@ -430,12 +589,13 @@ const AudioAnalyzer: React.FC = () => {
 
 		// in radial dual-vertical layout, the scale is positioned exactly between both channels, by making the canvas a bit larger than the inner diameter
 		canvasR.width = canvasR.height = Math.max(
-			minDimension * 0.15,
+			dimensionMin * 0.15,
 			(innerRadius << 1) + Number(isDualVertical) * scaleHeight,
 		);
 
 		const centerR = canvasR.width >> 1;
-		const radialY = centerR - scaleHeight * 0.7; // vertical position of text labels in the circular scale
+		// vertical position of text labels in the circular scale
+		const radialY = centerR - scaleHeight * 0.7;
 
 		// helper function
 		const radialLabel = (x: number, label: string | number) => {
@@ -452,7 +612,7 @@ const AudioAnalyzer: React.FC = () => {
 		};
 
 		// clear scale canvas
-		canvasX.width |= 0;
+		canvasX.width = Math.trunc(canvasX.width);
 
 		scaleX.fillStyle = scaleR.strokeStyle = SCALEX_BACKGROUND_COLOR;
 		scaleX.fillRect(0, 0, canvasX.width, canvasX.height);
@@ -472,11 +632,11 @@ const AudioAnalyzer: React.FC = () => {
 		for (const item of freqLabels) {
 			const [freq, label] = Array.isArray(item)
 				? item
-				: [item, item < 1e3 ? item | 0 : `${((item / 100) | 0) / 10}k`];
+				: [item, item < 1e3 ? Math.trunc(item) : `${(Math.trunc(item / 100)) / 10}k`];
 			const x = unitWidth * (freqScaling(freq) - scaleMin);
 			const y = canvasX.height * 0.75;
-			const isC = typeof label === "string" && label[0] === "C";
-			const maxW =
+			const isC = typeof label === "string" && label.startsWith("C");
+			const widthMax =
 				fontSizeX *
 				(noteLabels && !mirror && !isDualHorizontal ? (isC ? 1.2 : 0.6) : 3);
 
@@ -499,23 +659,28 @@ const AudioAnalyzer: React.FC = () => {
 					(!isLinear && freq > 250) ||
 					((!radial || isDualVertical) &&
 						((!isLinear && freq > 125) || freq > 1e3))
-				)
+				) {
 					allowedLabels.push("G");
+				}
 				if (
 					isLog ||
 					freq > 4e3 ||
 					(!isLinear && freq > 500) ||
 					((!radial || isDualVertical) &&
 						((!isLinear && freq > 250) || freq > 2e3))
-				)
+				) {
 					allowedLabels.push("E");
+				}
 				if (
 					(isLinear && freq > 4e3) ||
 					((!radial || isDualVertical) &&
 						(isLog || freq > 2e3 || (!isLinear && freq > 500)))
-				)
+				) {
 					allowedLabels.push("D", "F", "A", "B");
-				if (!allowedLabels.includes((label as string)[0])) continue; // skip this label
+				}
+				if (!allowedLabels.includes((label as string)[0])) {
+					continue; // skip this label
+				}
 			}
 
 			// linear scale
@@ -524,19 +689,21 @@ const AudioAnalyzer: React.FC = () => {
 					label.toString(),
 					isDualHorizontal && mirror === -1 ? analyzerWidth - x : initialX + x,
 					y,
-					maxW,
+					widthMax,
 				);
-				if (isDualHorizontal || (mirror && (x > labelWidthX || mirror === 1)))
+				if (isDualHorizontal || (mirror && (x > labelWidthX || mirror === 1))) {
 					scaleX.fillText(
 						label.toString(),
 						isDualHorizontal && mirror !== 1
 							? analyzerWidth + x
 							: (initialX || canvas.width) - x,
 						y,
-						maxW,
+						widthMax,
 					);
+				}
 				prevX =
-					x + Math.min(maxW, scaleX.measureText(label.toString()).width) / 2;
+					x +
+					Math.min(widthMax, scaleX.measureText(label.toString()).width) / 2;
 			}
 
 			// radial scale
@@ -546,40 +713,26 @@ const AudioAnalyzer: React.FC = () => {
 					isDualHorizontal && mirror === 1 ? analyzerWidth - x : x,
 					label,
 				);
-				if (isDualHorizontal || (mirror && (x > labelWidthR || mirror === 1)))
+				if (isDualHorizontal || (mirror && (x > labelWidthR || mirror === 1))) {
 					// avoid overlapping of first labels on mirror mode
 					radialLabel(
 						isDualHorizontal && mirror !== -1 ? analyzerWidth + x : -x,
 						label,
 					);
+				}
 				prevR = x;
 			}
 		}
 	}, [mirror, noteLabels, channelLayout, radial, ansiBands, freqScaling]);
 
+	// Recomputes bar layout (bars, leds), geometry (aux) and render flags (flg) from current settings, then rebuilds the scales.
 	const calcBars = useCallback(() => {
-		if (!canvasRef.current) return;
-		const canvas = canvasRef.current;
-		bars.current = [];
-		let newBars: AnalyzerBarData[] = bars.current; // initialize object property
-
-		//TODO: check if needed
-
-		/**
-		if (!this._ready) {
-			this._flg = {
-				isAlpha: false,
-				isBands: false,
-				isLeds: false,
-				isLumi: false,
-				isOctaves: false,
-				isOutline: false,
-				isRound: false,
-				noLedGap: false,
-			};
+		if (!canvasRef.current) {
 			return;
 		}
-			*/
+		const canvas = canvasRef.current;
+		bars.current = [];
+		const newBars: AnalyzerBarData[] = bars.current; // alias; filled below
 
 		const centerX = canvas.width >> 1;
 		const centerY = canvas.height >> 1;
@@ -588,9 +741,9 @@ const AudioAnalyzer: React.FC = () => {
 		const isDualHorizontal = channelLayout === CHANNEL_LAYOUT.DUAL_HORIZONTAL;
 		// COMPUTE FLAGS
 		const mode = Number(modeInputRef.current?.value) as Mode;
-		const minFreq = Number(minFreqRef.current?.value) || 20;
-		const maxFreq = Number(maxFreqRef.current?.value) || 20000;
-		const frequencyScale = frequencyScaleRef.current?.value as FrequencyScale;
+		const freqMin = Number(freqMinRef.current?.value) || 20;
+		const freqMax = Number(freqMaxRef.current?.value) || 20000;
+		const frequencyScale = readFrequencyScale(frequencyScaleRef.current);
 		const isBands = mode % 10 !== 0; // true for modes 1 to 9
 
 		const isOctaves = isBands && frequencyScale === FrequencyScale.LOG;
@@ -609,57 +762,34 @@ const AudioAnalyzer: React.FC = () => {
 			Number(isDualVertical);
 		// analyzerHeight is the effective height used to render the analyzer, excluding the reflex area
 		const analyzerHeight =
-			(channelHeight * (isLumi || radial ? 1 : 1 - reflexRatio)) | 0;
+			Math.trunc(channelHeight * (isLumi || radial ? 1 : 1 - reflexRatio));
 		const analyzerWidth =
 			canvas.width - centerX * Number(isDualHorizontal || mirror !== 0);
-		// channelGap is **0** if isLedDisplay == true (LEDs already have spacing); **1** if canvas height is odd (windowed); **2** if it's even
-		// TODO: improve this, make it configurable?
+		// channelGap is 0 when isLeds (LEDs already have spacing), 1 if canvas height is odd (windowed), 2 if even
+		// TODO: expose the dual-vertical channel gap as a setting instead of deriving it from canvas height parity.
 		const channelGap = isDualVertical ? canvas.height - channelHeight * 2 : 0;
 		const initialX =
 			centerX * Number(mirror === -1 && !isDualHorizontal && !radial);
 
 		let innerRadius =
-			(Math.min(canvas.width, canvas.height) *
+			Math.trunc(Math.min(canvas.width, canvas.height) *
 				0.375 *
-				(channelLayout === CHANNEL_LAYOUT.DUAL_VERTICAL ? 1 : radius)) |
-			0;
+				(channelLayout === CHANNEL_LAYOUT.DUAL_VERTICAL ? 1 : radius));
 		let outerRadius = Math.min(centerX, centerY);
 
-		if (radialInvert && channelLayout !== CHANNEL_LAYOUT.DUAL_VERTICAL)
+		if (radialInvert && channelLayout !== CHANNEL_LAYOUT.DUAL_VERTICAL) {
 			[innerRadius, outerRadius] = [outerRadius, innerRadius];
+		}
 
-		/**
+		/*
 		 *	CREATE ANALYZER BANDS
 		 *
-		 *	USES:
-		 *		analyzerWidth
-		 *		initialX
-		 *		isBands
-		 *		isOctaves
-		 *
-		 *	GENERATES:
-		 *		bars (populates this.bars.current)
-		 *		bardWidth
-		 *		scaleMin
-		 *		unitWidth
+		 *	USES: analyzerWidth, initialX, isBands, isOctaves
+		 *	GENERATES: bars.current, barWidth, scaleMin, unitWidth
 		 */
 
-		// helper function to add a bar to the bars array
-		// bar object format:
-		// {
-		//	 posX,
-		//   freq,
-		//   freqLo,
-		//   freqHi,
-		//   binLo,
-		//   binHi,
-		//   ratioLo,
-		//   ratioHi,
-		//   peak,    // peak value
-		//   hold,    // peak hold frames (negative value indicates peak falling / fading)
-		//   alpha,   // peak alpha (used by fadePeaks)
-		//   value    // current bar value
-		// }
+		// helper to append a bar (see AnalyzerBarData); peak/hold/alpha/value are per-channel tuples,
+		// hold < 0 means the peak is falling or fading.
 		const barsPush = (
 			args: Omit<
 				AnalyzerBarData,
@@ -714,10 +844,10 @@ const AudioAnalyzer: React.FC = () => {
 
 		if (isOctaves) {
 			// helper function to round a value to a given number of significant digits
-			// `atLeast` set to true prevents reducing the number of integer significant digits
-			const roundSD = (value: number, digits: number, atLeast?: boolean) =>
+			// `isAtLeast` set to true prevents reducing the number of integer significant digits
+			const roundSD = (value: number, digits: number, isAtLeast?: boolean) =>
 				+value.toPrecision(
-					atLeast ? Math.max(digits, (1 + Math.log10(value)) | 0) : digits,
+					isAtLeast ? Math.max(digits, Math.trunc(1 + Math.log10(value))) : digits,
 				);
 
 			// helper function to find the nearest preferred number (Renard series) for a given value
@@ -727,15 +857,19 @@ const AudioAnalyzer: React.FC = () => {
 					1, 1.12, 1.25, 1.4, 1.6, 1.8, 2, 2.24, 2.5, 2.8, 3.15, 3.55, 4, 4.5,
 					5, 5.6, 6.3, 7.1, 8, 9, 10,
 				];
-				const power = Math.log10(value) | 0;
+				const power = Math.trunc(Math.log10(value));
 				const normalized = value / 10 ** power;
 
 				let i = 1;
-				while (i < preferred.length && normalized > preferred[i]) i++;
+				while (i < preferred.length && normalized > preferred[i]) {
+					i++;
+				}
 
-				if (normalized - preferred[i - 1] < preferred[i] - normalized) i--;
+				if (normalized - preferred[i - 1] < preferred[i] - normalized) {
+					i--;
+				}
 
-				return ((preferred[i] * 10 ** (power + 5)) | 0) / 1e5; // keep 5 significant digits
+				return (Math.trunc(preferred[i] * 10 ** (power + 5))) / 1e5; // keep 5 significant digits
 			};
 
 			// ANSI standard octave bands use the base-10 frequency ratio, as preferred by [ANSI S1.11-2004, p.2]
@@ -759,14 +893,19 @@ const AudioAnalyzer: React.FC = () => {
 
 				// for 1/1, 1/2 and 1/3 ANSI bands, use the preferred numbers to find the nominal midband frequency
 				// for 1/4 to 1/24, round to 2 or 3 significant digits, according to the MSD [ANSI S1.11-2004, p.12]
-				if (ansiBands)
+				if (ansiBands) {
 					freq =
 						bands < 4
 							? nearestPreferred(freq)
-							: roundSD(freq, Number.parseInt(freq.toString()[0], 10) < 5 ? 3 : 2);
-				else freq = roundSD(freq, 4, true);
+							: roundSD(
+									freq,
+									Number.parseInt(freq.toString()[0], 10) < 5 ? 3 : 2,
+								);
+				} else {
+					freq = roundSD(freq, 4, true);
+				}
 
-				if (freq >= minFreq)
+				if (freq >= freqMin) {
 					barsPush({
 						posX: 0,
 						freq,
@@ -777,16 +916,16 @@ const AudioAnalyzer: React.FC = () => {
 						ratioLo,
 						ratioHi,
 					});
+				}
 
 				currFreq *= bandWidth;
-			} while (currFreq <= maxFreq);
+			} while (currFreq <= freqMax);
 
 			barWidth = analyzerWidth / newBars.length;
 
-			newBars = newBars.map((bar, index) => ({
-				...bar,
-				posX: initialX + index * barWidth,
-			}));
+			for (let i = 0; i < newBars.length; i++) {
+				newBars[i].posX = initialX + i * barWidth;
+			}
 
 			const firstBar = newBars[0];
 			const lastBar = newBars[newBars.length - 1];
@@ -794,16 +933,16 @@ const AudioAnalyzer: React.FC = () => {
 			scaleMin = freqScaling(firstBar.freqLo);
 			unitWidth = analyzerWidth / (freqScaling(lastBar.freqHi) - scaleMin);
 
-			// clamp edge frequencies to minFreq / maxFreq, if necessary
+			// clamp edge frequencies to freqMin / freqMax, if necessary
 			// this is done after computing scaleMin and unitWidth, for the proper positioning of labels on the X-axis
-			if (firstBar.freqLo && firstBar.freqLo < minFreq) {
-				firstBar.freqLo = minFreq;
-				[firstBar.binLo, firstBar.ratioLo] = calcRatio(minFreq);
+			if (firstBar.freqLo && firstBar.freqLo < freqMin) {
+				firstBar.freqLo = freqMin;
+				[firstBar.binLo, firstBar.ratioLo] = calcRatio(freqMin);
 			}
 
-			if (lastBar.freqHi && lastBar.freqHi > maxFreq) {
-				lastBar.freqHi = maxFreq;
-				[lastBar.binHi, lastBar.ratioHi] = calcRatio(maxFreq);
+			if (lastBar.freqHi && lastBar.freqHi > freqMax) {
+				lastBar.freqHi = freqMax;
+				[lastBar.binHi, lastBar.ratioHi] = calcRatio(freqMax);
 			}
 		} else if (isBands) {
 			// a bands mode is selected, but frequency scale is not logarithmic
@@ -825,8 +964,8 @@ const AudioAnalyzer: React.FC = () => {
 
 			barWidth = analyzerWidth / bands;
 
-			scaleMin = freqScaling(minFreq);
-			unitWidth = analyzerWidth / (freqScaling(maxFreq) - scaleMin);
+			scaleMin = freqScaling(freqMin);
+			unitWidth = analyzerWidth / (freqScaling(freqMax) - scaleMin);
 
 			for (let i = 0, posX = 0; i < bands; i++, posX += barWidth) {
 				const freqLo = invFreqScaling(scaleMin + posX / unitWidth);
@@ -852,15 +991,15 @@ const AudioAnalyzer: React.FC = () => {
 			// Discrete frequencies modes
 			barWidth = 1;
 
-			scaleMin = freqScaling(minFreq);
-			unitWidth = analyzerWidth / (freqScaling(maxFreq) - scaleMin);
+			scaleMin = freqScaling(freqMin);
+			unitWidth = analyzerWidth / (freqScaling(freqMax) - scaleMin);
 
-			const minIndex = freqToBin(minFreq, "floor");
-			const maxIndex = freqToBin(maxFreq);
+			const indexMin = freqToBin(freqMin, "floor");
+			const indexMax = freqToBin(freqMax, "round");
 
 			let lastPos = -999;
 
-			for (let i = minIndex; i <= maxIndex; i++) {
+			for (let i = indexMin; i <= indexMax; i++) {
 				const freq = binToFreq(i); // frequency represented by this index
 				const posX =
 					initialX + Math.round(unitWidth * (freqScaling(freq) - scaleMin)); // avoid fractionary pixel values
@@ -878,28 +1017,25 @@ const AudioAnalyzer: React.FC = () => {
 						ratioHi: 0,
 					});
 					lastPos = posX;
-				} // otherwise, add this frequency to the last bar's range
-				else if (newBars.length) {
-					const lastBar = newBars[newBars.length - 1];
-					lastBar.binHi = i;
-					lastBar.freqHi = freq;
-					lastBar.freq = (lastBar.freqLo * freq) ** 0.5; // compute center frequency (geometric mean)
+					continue;
 				}
+
+				// otherwise, add this frequency to the last bar's range
+				const lastBar = newBars[newBars.length - 1];
+				if (!lastBar) {
+					continue;
+				}
+				lastBar.binHi = i;
+				lastBar.freqHi = freq;
+				lastBar.freq = (lastBar.freqLo * freq) ** 0.5; // compute center frequency (geometric mean)
 			}
 		}
 
-		/**
-		 *  COMPUTE ATTRIBUTES FOR THE LED BARS
+		/*
+		 *	COMPUTE ATTRIBUTES FOR THE LED BARS
 		 *
-		 *	USES:
-		 *		analyzerHeight
-		 *		barWidth
-		 *		noLedGap
-		 *
-		 *	GENERATES:
-		 * 		spaceH
-		 * 		spaceV
-		 *		this._leds
+		 *	USES: analyzerHeight, barWidth, noLedGap
+		 *	GENERATES: spaceH, spaceV, leds.current
 		 */
 
 		let spaceH = 0;
@@ -926,43 +1062,22 @@ const AudioAnalyzer: React.FC = () => {
 			const [maxLeds, spaceVRatio, spaceHRatio] = ledParams;
 
 			let ledCount = 0;
-			let maxHeight = analyzerHeight;
+			let heightMax = analyzerHeight;
 
 			// calculate vertical spacing - aim for the reference ratio, but make sure it's at least 2px
 			const refRatio = 540 / spaceVRatio;
 			spaceV = Math.min(
 				spaceVRatio * dPR,
-				Math.max(2, (maxHeight / refRatio + 0.1) | 0),
+				Math.max(2, Math.trunc(heightMax / refRatio + 0.1)),
 			);
-			/**
-			if (customParams) {
-				const minHeight = 2 * dPR;
-				let blockHeight: number;
-				ledCount = maxLeds + 1;
-				do {
-					ledCount--;
-					blockHeight = maxHeight / ledCount / (1 + spaceVRatio);
-					spaceV = blockHeight * spaceVRatio;
-				} while (
-					(blockHeight < minHeight || spaceV < minHeight) &&
-					ledCount > 1
-				);
-			} else {
-				// calculate vertical spacing - aim for the reference ratio, but make sure it's at least 2px
-				const refRatio = 540 / spaceVRatio;
-				spaceV = Math.min(
-					spaceVRatio * dPR,
-					Math.max(2, (maxHeight / refRatio + 0.1) | 0),
-				);
-			}
-			*/
 
 			// remove the extra spacing below the last line of LEDs
-			if (noLedGap) maxHeight += spaceV;
+			if (noLedGap) {
+				heightMax += spaceV;
+			}
 
 			// recalculate the number of leds, considering the effective spaceV
-			//if (!customParams)
-			ledCount = Math.min(maxLeds, (maxHeight / (spaceV * 2)) | 0);
+			ledCount = Math.min(maxLeds, Math.trunc(heightMax / (spaceV * 2)));
 
 			spaceH = spaceHRatio >= 1 ? spaceHRatio : barWidth * spaceHRatio;
 
@@ -970,40 +1085,43 @@ const AudioAnalyzer: React.FC = () => {
 				ledCount,
 				spaceH,
 				spaceV,
-				maxHeight / ledCount - spaceV, // ledHeight
+				heightMax / ledCount - spaceV, // ledHeight
 			];
 		}
 
 		// COMPUTE ADDITIONAL BAR POSITIONING, ACCORDING TO THE CURRENT SETTINGS
-		// uses: bars.currentpace, barWidth, spaceH
+		// uses: barSpace, barWidth, spaceH
 
 		const barSpacePx = Math.min(
 			barWidth - 1,
 			barSpace * (barSpace > 0 && barSpace < 1 ? barWidth : 1),
 		);
 
-		if (isBands) barWidth -= Math.max(isLeds ? spaceH : 0, barSpacePx);
+		if (isBands) {
+			barWidth -= Math.max(isLeds ? spaceH : 0, barSpacePx);
+		}
 
 		newBars.forEach((bar, index) => {
 			let posX = bar.posX;
 			let width = barWidth;
 
 			// in bands modes we need to update bar.posX to account for bar/led spacing
+			const isGapless = isBands && barSpace === 0 && !isLeds;
+			const prevBar = index > 0 ? newBars[index - 1] : undefined;
 
+			if (isGapless) {
+				// when barSpace == 0 use integer values for perfect gapless positioning
+				posX = Math.trunc(posX);
+				width = Math.trunc(width);
+			}
+			if (isGapless && prevBar && posX > prevBar.posX + prevBar.width) {
+				posX--;
+				width++;
+			}
+			if (isBands && !isGapless) {
+				posX += Math.max(isLeds ? spaceH : 0, barSpacePx) / 2;
+			}
 			if (isBands) {
-				if (barSpace === 0 && !isLeds) {
-					// when barSpace == 0 use integer values for perfect gapless positioning
-					posX |= 0;
-					width |= 0;
-					if (
-						index > 0 &&
-						posX > newBars[index - 1].posX + newBars[index - 1].width
-					) {
-						posX--;
-						width++;
-					}
-				} else posX += Math.max(isLeds ? spaceH : 0, barSpacePx) / 2;
-
 				bar.posX = posX; // update
 			}
 
@@ -1089,87 +1207,88 @@ const AudioAnalyzer: React.FC = () => {
 	// 4. Safari won't trigger `fullscreenchange` events at all, and on iPadOS the `resize`
 	//    event is triggered **on the window** only (last tested on iPadOS 14)
 
-	// helper function for resize events
+	// applies the current size settings to the canvas; returns false when the canvas isn't ready
+	const applyCanvasSize = useCallback(
+		(reason: REASON): boolean => {
+			const canvas = canvasRef.current;
+			const container = containerRef.current;
+			const scaleX = canvasXRef.current?.getContext("2d");
+			const ctx = canvas?.getContext("2d");
+			if (!(canvas && container && scaleX && ctx)) {
+				return false;
+			}
+			setCanvas({
+				reason,
+				ready: true,
+				isFullscreen,
+				fsEl: canvas,
+				container,
+				canvas,
+				scaleX,
+				loRes: false,
+				ctx,
+				setPixelRatio: (ratio: number) => {
+					pixelRatio.current = ratio;
+				},
+				defaultHeight,
+				defaultWidth,
+				overlay,
+				calcBars,
+				height,
+				width,
+			});
+			return true;
+		},
+		[isFullscreen, overlay, calcBars, height, width],
+	);
 
 	const onResize = useCallback(() => {
-		if (!fsTimeout.current) {
-			// delay the resize to prioritize a possible following `fullscreenchange` event
-			fsTimeout.current = window.setTimeout(() => {
-				if (canvasRef.current && canvasXRef.current && containerRef.current) {
-					const scaleX = canvasXRef.current.getContext("2d");
-					const ctx = canvasRef.current.getContext("2d");
-					if (scaleX && ctx && !fsChanging.current) {
-						setCanvas({
-							reason: REASON.RESIZE,
-							ready: true,
-							isFullscreen: isFullscreen,
-							fsEl: canvasRef.current,
-							container: containerRef.current,
-							canvas: canvasRef.current,
-							scaleX: scaleX,
-							loRes: false,
-							ctx: ctx,
-							setPixelRatio: (ratio: number) => {
-								pixelRatio.current = ratio;
-							},
-							defaultHeight,
-							defaultWidth,
-							overlay,
-							calcBars,
-							height,
-							width,
-						});
-						makeGrad();
-						fsTimeout.current = 0;
-					}
-				}
-			}, DEBOUNCE_TIMEOUT);
+		if (fsTimeout.current) {
+			return;
 		}
-	}, [calcBars, isFullscreen, overlay, makeGrad, height, width]);
+		// delay the resize to prioritize a possible following `fullscreenchange` event
+		fsTimeout.current = window.setTimeout(() => {
+			if (fsChanging.current || !applyCanvasSize(REASON.RESIZE)) {
+				return;
+			}
+			makeGrad();
+			fsTimeout.current = 0;
+		}, DEBOUNCE_TIMEOUT);
+	}, [applyCanvasSize, makeGrad]);
 
+	// Toggles fullscreen on the analyzer canvas (with WebKit fallbacks); kept for a planned fullscreen control.
 	const toggleFullscreen = () => {
 		if (isFullscreen) {
-			if (document.exitFullscreen) document.exitFullscreen();
-			else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-		} else {
-			const fsEl = canvasRef.current;
-			if (!fsEl) return;
-			if (fsEl.requestFullscreen) fsEl.requestFullscreen();
-			else if (fsEl.webkitRequestFullscreen) fsEl.webkitRequestFullscreen();
+			if (document.exitFullscreen) {
+				document.exitFullscreen();
+			} else if (document.webkitExitFullscreen) {
+				document.webkitExitFullscreen();
+			}
+			return;
+		}
+		const fsEl = canvasRef.current;
+		if (!fsEl) {
+			return;
+		}
+		if (fsEl.requestFullscreen) {
+			fsEl.requestFullscreen();
+		} else if (fsEl.webkitRequestFullscreen) {
+			fsEl.webkitRequestFullscreen();
 		}
 	};
 
-	const normalizedB = (value: number) => {
-		const isLinear = linearAmplitude;
-		const boost = isLinear ? 1 / linearBoost : 1;
-		const clamp = (val: number, min: number, max: number) =>
-			val <= min ? min : val >= max ? max : val;
-		const dBToLinear = (val: number) => 10 ** (val / 20);
-
-		let maxValue = maxDecibels;
-		let minValue = minDecibels;
-		let newValue = value;
-
-		if (isLinear) {
-			maxValue = dBToLinear(maxValue);
-			minValue = dBToLinear(minValue);
-			newValue = dBToLinear(value) ** boost;
-		}
-
-		return clamp((newValue - minValue) / (maxValue - minValue) ** boost, 0, 1);
-	};
-
-	const draw = (timestamp: number) => {
+	// per-frame render callback; an Effect Event so the rAF loop always sees the latest state
+	const draw = useEffectEvent((timestamp: number) => {
 		const signal = latestSignal.current;
-		runId.current = requestAnimationFrame(draw);
 		const elapsed = timestamp - time.current; // time since last FPS computation
 		const frameTime = timestamp - last.current; // time since last rendered frame
-		const targetInterval = maxFPS ? 975 / maxFPS : 0; // small tolerance for best results
 
-		if (frameTime < targetInterval) return;
+		if (frameTime < TARGET_INTERVAL) {
+			return;
+		}
 
 		last.current =
-			timestamp - (targetInterval ? frameTime % targetInterval : 0);
+			timestamp - (TARGET_INTERVAL ? frameTime % TARGET_INTERVAL : 0);
 		frames.current++;
 
 		if (elapsed >= 1000) {
@@ -1180,16 +1299,8 @@ const AudioAnalyzer: React.FC = () => {
 		}
 		// initialize local constants
 
-		const {
-			isAlpha,
-			isBands,
-			isLeds,
-			isLumi,
-			isOctaves,
-			isOutline,
-			isRound,
-			noLedGap,
-		} = flg.current;
+		const { isAlpha, isBands, isLeds, isLumi, isOutline, isRound } =
+			flg.current;
 		const {
 			analyzerHeight,
 			centerX,
@@ -1205,13 +1316,18 @@ const AudioAnalyzer: React.FC = () => {
 		const canvasX = canvasXRef.current;
 		const canvasR = canvasRRef.current;
 		const canvas = canvasRef.current;
-		if (!(canvasX && canvasR && canvas)) return;
+		if (!(canvasX && canvasR && canvas)) {
+			return;
+		}
 		const ctx = canvas.getContext("2d");
-		if (!ctx) return;
+		if (!ctx) {
+			return;
+		}
 
 		const fadeFrames = (fps.current * peakFadeTime) / 1e3;
 		const fpsSquared = fps.current ** 2;
-		const gravity = 3.8 * 1e3; // make configurable
+		// TODO: make peak gravity configurable (fall acceleration constant, scaled by fps² and nominal height).
+		const gravity = 3.8 * 1e3;
 		const holdFrames = (fps.current * peakHoldTime) / 1e3;
 		const isDualCombined = channelLayout === CHANNEL_LAYOUT.DUAL_COMBINED;
 		const isDualHorizontal = channelLayout === CHANNEL_LAYOUT.DUAL_HORIZONTAL;
@@ -1223,13 +1339,31 @@ const AudioAnalyzer: React.FC = () => {
 		const finalX = initialX + analyzerWidth;
 		const mode = Number(modeInputRef.current?.value) as Mode;
 		const showPeakLine = showPeaks && peakLine && mode === MODE_GRAPH;
-		const maxBarHeight = radial ? outerRadius - innerRadius : analyzerHeight;
-		const nominalMaxHeight = maxBarHeight / pixelRatio.current; // for consistent gravity on lo-res or hi-dpi
+		const barHeightMax = radial ? outerRadius - innerRadius : analyzerHeight;
+		const nominalMaxHeight = barHeightMax / pixelRatio.current; // for consistent gravity on lo-res or hi-dpi
 		const dbRange = maxDecibels - minDecibels;
-		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = leds.current || [];
+		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = leds.current;
+		const normalizedB = makeNormalizer(
+			linearAmplitude,
+			linearBoost,
+			maxDecibels,
+			minDecibels,
+		);
+		// initial alpha for a new or fading peak, matching the alpha used for non-fading peaks:
+		// solid for outlines with a line, peak value for alpha bars, fillAlpha for outlines without a line
+		const peakInitialAlpha = (value: number) =>
+			isOutline && lineWidth > 0
+				? 1
+				: isAlpha
+					? value
+					: isOutline
+						? fillAlpha
+						: 1;
 
-		if (energy.current.val > 0 && fps.current > 0)
-			spinAngle.current += (spinSpeed * TAU) / 60 / fps.current; // spinSpeed * angle increment per frame for 1 RPM
+		if (energy.current.val > 0 && fps.current > 0) {
+			// spinSpeed is in RPM: advance TAU radians per revolution / 60 s / fps frames
+			spinAngle.current += (spinSpeed * TAU) / 60 / fps.current;
+		}
 
 		/* HELPER FUNCTIONS */
 
@@ -1250,9 +1384,10 @@ const AudioAnalyzer: React.FC = () => {
 
 				ctx.save();
 
-				// set alpha and brightness for the reflection
 				ctx.globalAlpha = reflexAlpha;
-				if (reflexBright !== 1) ctx.filter = `brightness(${reflexBright})`;
+				if (reflexBright !== 1) {
+					ctx.filter = `brightness(${reflexBright})`;
+				}
 
 				// create the reflection
 				ctx.setTransform(1, 0, 0, -1, 0, canvas.height);
@@ -1278,73 +1413,15 @@ const AudioAnalyzer: React.FC = () => {
 				if (radial) {
 					ctx.save();
 					ctx.translate(centerX, centerY);
-					if (spinSpeed) ctx.rotate(spinAngle.current + HALF_PI);
+					if (spinSpeed) {
+						ctx.rotate(spinAngle.current + HALF_PI);
+					}
 					ctx.drawImage(canvasR, -canvasR.width >> 1, -canvasR.width >> 1);
 					ctx.restore();
-				} else ctx.drawImage(canvasX, 0, canvas.height - canvasX.height);
-			}
-		};
-
-		// returns the gain (in dB) for a given frequency, considering the currently selected weighting filter
-		const weightingdB = (freq: number) => {
-			const f2 = freq ** 2;
-			const SQ20_6 = 424.36;
-			const SQ107_7 = 11599.29;
-			const SQ158_5 = 25122.25;
-			const SQ737_9 = 544496.41;
-			const SQ12194 = 148693636;
-			const linearTodB = (value: number) => 20 * Math.log10(value);
-
-			switch (weightingFilter) {
-				case FILTER.A: {
-					// A-weighting https://en.wikipedia.org/wiki/A-weighting
-					const rA =
-						(SQ12194 * f2 ** 2) /
-						((f2 + SQ20_6) *
-							Math.sqrt((f2 + SQ107_7) * (f2 + SQ737_9)) *
-							(f2 + SQ12194));
-					return 2 + linearTodB(rA);
-				}
-
-				case FILTER.B: {
-					const rB =
-						(SQ12194 * f2 * freq) /
-						((f2 + SQ20_6) * Math.sqrt(f2 + SQ158_5) * (f2 + SQ12194));
-					return 0.17 + linearTodB(rB);
-				}
-
-				case FILTER.C: {
-					const rC = (SQ12194 * f2) / ((f2 + SQ20_6) * (f2 + SQ12194));
-					return 0.06 + linearTodB(rC);
-				}
-
-				case FILTER.D: {
-					const h =
-						((1037918.48 - f2) ** 2 + 1080768.16 * f2) /
-						((9837328 - f2) ** 2 + 11723776 * f2);
-					const rD =
-						(freq / 6.8966888496476e-5) *
-						Math.sqrt(h / ((f2 + 79919.29) * (f2 + 1345600)));
-					return linearTodB(rD);
-				}
-
-				case FILTER.FOUR_SIX_EIGHT: {
-					// ITU-R 468 https://en.wikipedia.org/wiki/ITU-R_468_noise_weighting
-					const h1 =
-						-4.737338981378384e-24 * freq ** 6 +
-						2.043828333606125e-15 * freq ** 4 -
-						1.363894795463638e-7 * f2 +
-						1;
-					const h2 =
-						1.306612257412824e-19 * freq ** 5 -
-						2.118150887518656e-11 * freq ** 3 +
-						5.559488023498642e-4 * freq;
-					const rI = (1.246332637532143e-4 * freq) / Math.hypot(h1, h2);
-					return 18.2 + linearTodB(rI);
+				} else {
+					ctx.drawImage(canvasX, 0, canvas.height - canvasX.height);
 				}
 			}
-
-			return 0; // unknown filter
 		};
 
 		// draws (stroke) a bar from x,y1 to x,y2
@@ -1356,8 +1433,8 @@ const AudioAnalyzer: React.FC = () => {
 		};
 
 		// conditionally strokes current path on canvas
-		const strokeIf = (flag?: boolean) => {
-			if (flag && lineWidth) {
+		const strokeIf = (shouldStroke?: boolean) => {
+			if (shouldStroke && lineWidth) {
 				const alpha = ctx.globalAlpha;
 				ctx.globalAlpha = 1;
 				ctx.stroke();
@@ -1369,7 +1446,7 @@ const AudioAnalyzer: React.FC = () => {
 		const ledPosY = (value: number) =>
 			Math.max(
 				0,
-				((value * ledCount) | 0) * (ledHeight + ledSpaceV) - ledSpaceV,
+				(Math.trunc(value * ledCount)) * (ledHeight + ledSpaceV) - ledSpaceV,
 			);
 
 		// update energy information
@@ -1377,11 +1454,12 @@ const AudioAnalyzer: React.FC = () => {
 			energy.current.val = newVal;
 			if (energy.current.peak > 0) {
 				energy.current.hold--;
-				if (energy.current.hold < 0)
+				if (energy.current.hold < 0) {
 					energy.current.peak +=
 						((energy.current.hold * gravity) / fpsSquared / canvas.height) *
 						pixelRatio.current;
-				// TO-DO: replace `canvas.height * this._pixelRatio` with `maxNominalHeight` when implementing dual-channel energy
+				}
+				// TODO: replace `canvas.height * pixelRatio.current` with `nominalMaxHeight` when implementing dual-channel energy
 			}
 			if (newVal >= energy.current.peak) {
 				energy.current.peak = newVal;
@@ -1391,19 +1469,62 @@ const AudioAnalyzer: React.FC = () => {
 
 		/* MAIN FUNCTION */
 
-		if (overlay) ctx.clearRect(0, 0, canvas.width, canvas.height);
+		if (overlay) {
+			ctx.clearRect(0, 0, canvas.width, canvas.height);
+		}
 
 		let currentEnergy = 0;
 
 		const nBars = bars.current.length;
 		const nChannels = isSingle ? 1 : 2;
-		if (!gradientSelectRef.current) return;
-		const selectedGrads = gradientSelectRef.current?.value.split(",");
+		if (!gradientSelectRef.current) {
+			return;
+		}
+		const selectedGrads = gradientSelectRef.current.value.split(",");
+
+		// get a new array of data from the FFT (linear magnitudes converted to dB) - shared by all channels
+		if (dbSignal.current.length !== signal.length) {
+			dbSignal.current = new Float32Array(signal.length);
+		}
+		const fftData = magnitudesToDb(signal, fftSize, dbSignal.current);
+
+		// apply weighting, using a gain table cached per filter / FFT size / sample rate / bin count
+		if (weightingFilter) {
+			const binCount = fftData.length;
+			const sampleRate = audioCtx.current?.sampleRate || 48000;
+			const key = weightingKey.current;
+			if (
+				key.filter !== weightingFilter ||
+				key.fftSize !== fftSize ||
+				key.sampleRate !== sampleRate ||
+				key.bins !== binCount
+			) {
+				const table = new Float64Array(binCount);
+				for (let i = 0; i < binCount; i++) {
+					table[i] = weightingdB(binToFreq(i), weightingFilter);
+				}
+				weightingTable.current = table;
+				weightingKey.current = {
+					filter: weightingFilter,
+					fftSize,
+					sampleRate,
+					bins: binCount,
+				};
+			}
+			const table = weightingTable.current;
+			for (let i = 0; i < binCount; i++) {
+				fftData[i] += table[i];
+			}
+		}
 
 		for (let channel = 0; channel < nChannels; channel++) {
 			const { channelTop, channelBottom, analyzerBottom } =
 				channelCoords[channel];
-			const channelGradient = gradients[selectedGrads[channel]];
+			const channelGradient =
+				gradients[selectedGrads[channel] ?? ""] ?? gradients[GRADIENTS[0][0]];
+			if (!channelGradient) {
+				continue;
+			}
 			const colorStops = channelGradient.colorStops;
 			const colorCount = colorStops.length;
 			const bgColor =
@@ -1416,29 +1537,9 @@ const AudioAnalyzer: React.FC = () => {
 					? 0
 					: analyzerWidth >> Number(channel || !invertedChannel);
 			const angularDirection = isDualHorizontal && invertedChannel ? -1 : 1; // 1 = clockwise, -1 = counterclockwise
-			/*
-				Expanded logic for radialOffsetX and angularDirection:
-	
-				let radialOffsetX = 0,
-					angularDirection = 1;
-	
-				if ( isDualHorizontal ) {
-					if ( channel == 0 ) { // LEFT channel
-						if ( mirror == -1 ) {
-							radialOffsetX = analyzerWidth;
-							angularDirection = -1;
-						}
-						else
-							radialOffsetX = analyzerWidth >> 1;
-					}
-					else {                // RIGHT channel
-						if ( mirror == 1 ) {
-							radialOffsetX = analyzerWidth >> 1;
-							angularDirection = -1;
-						}
-					}
-				}
-	*/
+			// dual-horizontal only: left channel starts at analyzerWidth/2 (or at analyzerWidth and runs
+			// counterclockwise when mirror === -1); right channel starts at 0, or at analyzerWidth/2 running
+			// counterclockwise when mirror === 1. Other layouts: offset 0, clockwise.
 			// draw scale on Y-axis (uses: channel, channelTop)
 			const drawScaleY = () => {
 				const scaleWidth = canvasX.height;
@@ -1459,34 +1560,37 @@ const AudioAnalyzer: React.FC = () => {
 
 				for (let val = max; val > min; val -= incr) {
 					const posY = channelTop + (max - val) * interval;
-					const even = Number(val % 2 === 0) | 0;
+					const even = Math.trunc(Number(val % 2 === 0));
 
 					if (even) {
 						const labelY = posY + fontSize * (posY === channelTop ? 0.8 : 0.35);
-						if (atStart)
+						if (atStart) {
 							ctx.fillText(val.toString(), scaleWidth * 0.85, labelY);
-						if (atEnd)
+						}
+						if (atEnd) {
 							ctx.fillText(
 								val.toString(),
 								(isDualHorizontal ? analyzerWidth : canvas.width) -
 									scaleWidth * 0.1,
 								labelY,
 							);
+						}
 						ctx.strokeStyle = SCALEY_LABEL_COLOR;
-						ctx.setLineDash([2, 4]);
+						ctx.setLineDash(DASH_EVEN);
 						ctx.lineDashOffset = 0;
 					} else {
 						ctx.strokeStyle = SCALEY_MIDLINE_COLOR;
-						ctx.setLineDash([2, 8]);
+						ctx.setLineDash(DASH_ODD);
 						ctx.lineDashOffset = 1;
 					}
 
 					ctx.beginPath();
+					// offset by 0.5 for a sharp 1px line (https://stackoverflow.com/a/13879402/2370385)
 					ctx.moveTo(
 						initialX + scaleWidth * even * Number(atStart),
-						~~posY + 0.5,
-					); // for sharp 1px line (https://stackoverflow.com/a/13879402/2370385)
-					ctx.lineTo(finalX - scaleWidth * even * Number(atEnd), ~~posY + 0.5);
+						Math.trunc(posY) + 0.5,
+					);
+					ctx.lineTo(finalX - scaleWidth * even * Number(atEnd), Math.trunc(posY) + 0.5);
 					ctx.stroke();
 				}
 				ctx.restore();
@@ -1526,7 +1630,7 @@ const AudioAnalyzer: React.FC = () => {
 				y: number,
 				w: number,
 				h: number,
-				stroke?: boolean,
+				isStroked?: boolean,
 			) => {
 				ctx.beginPath();
 				for (const dir of mirror && !isDualHorizontal
@@ -1537,7 +1641,7 @@ const AudioAnalyzer: React.FC = () => {
 						: [];
 					ctx.moveTo(...radialXY(x, y, dir));
 					ctx.lineTo(...radialXY(x, y + h, dir));
-					if (isRound)
+					if (isRound) {
 						ctx.arc(
 							centerX,
 							centerY,
@@ -1546,9 +1650,11 @@ const AudioAnalyzer: React.FC = () => {
 							endAngle as number,
 							dir !== 1,
 						);
-					else ctx.lineTo(...radialXY(x + w, y + h, dir));
+					} else {
+						ctx.lineTo(...radialXY(x + w, y + h, dir));
+					}
 					ctx.lineTo(...radialXY(x + w, y, dir));
-					if (isRound && !stroke)
+					if (isRound && !isStroked) {
 						// close the bottom line only when not in outline mode
 						ctx.arc(
 							centerX,
@@ -1558,9 +1664,22 @@ const AudioAnalyzer: React.FC = () => {
 							startAngle as number,
 							dir === 1,
 						);
+					}
 				}
-				strokeIf(stroke);
+				strokeIf(isStroked);
 				ctx.fill();
+			};
+
+			// returns the index of the color stop for a given level (uses: colorStops, colorCount, isLeds)
+			const findLevelIndex = (value: number) => {
+				const target = isLeds ? ledPosY(value) : value;
+				for (let i = colorCount - 1; i >= 0; i--) {
+					const level = colorStops[i].level;
+					if (target <= (isLeds ? ledPosY(level) : level)) {
+						return i;
+					}
+				}
+				return -1;
 			};
 
 			// set fillStyle and strokeStyle according to current colorMode (uses: channel, colorStops, colorCount)
@@ -1570,17 +1689,13 @@ const AudioAnalyzer: React.FC = () => {
 				if (
 					(colorMode === COLOR_GRADIENT && !isTrueLeds) ||
 					mode === MODE_GRAPH
-				)
+				) {
 					color = canvasGradients.current[channel];
-				else {
+				} else {
 					const selectedIndex =
 						colorMode === COLOR_BAR_INDEX
 							? barIndex % colorCount
-							: colorStops.findLastIndex((item) =>
-									isLeds
-										? ledPosY(value) <= ledPosY(item.level)
-										: value <= item.level,
-								);
+							: findLevelIndex(value);
 					color = colorStops[selectedIndex].color;
 				}
 				ctx.fillStyle = ctx.strokeStyle = color;
@@ -1600,12 +1715,14 @@ const AudioAnalyzer: React.FC = () => {
 
 				// fill the analyzer background if needed (not overlay or overlay + showBgColor)
 				if (!overlay || showBgColor) {
-					if (overlay) ctx.globalAlpha = bgAlpha;
+					if (overlay) {
+						ctx.globalAlpha = bgAlpha;
+					}
 
 					ctx.fillStyle = bgColor;
 
 					// exclude the reflection area when overlay is true and reflexAlpha == 1 (avoids alpha over alpha difference, in case bgAlpha < 1)
-					if (channel === 0 || !(radial || isDualCombined))
+					if (channel === 0 || !(radial || isDualCombined)) {
 						ctx.fillRect(
 							initialX,
 							channelTop - channelGap,
@@ -1613,6 +1730,7 @@ const AudioAnalyzer: React.FC = () => {
 							(overlay && reflexAlpha === 1 ? analyzerHeight : channelHeight) +
 								channelGap,
 						);
+					}
 
 					ctx.globalAlpha = 1;
 				}
@@ -1623,42 +1741,41 @@ const AudioAnalyzer: React.FC = () => {
 					!isLumi &&
 					!radial &&
 					(channel === 0 || !isDualCombined)
-				)
+				) {
 					drawScaleY();
+				}
 
 				// set line width and dash for LEDs effect
 				if (isLeds) {
 					ctx.setLineDash([ledHeight, ledSpaceV]);
 					ctx.lineWidth = bars.current[0].width;
-				} // for outline effect ensure linewidth is not greater than half the bar width
-				else
+				} else {
+					// for outline effect ensure linewidth is not greater than half the bar width
 					ctx.lineWidth = isOutline
 						? Math.min(lineWidth, bars.current[0].width / 2)
 						: lineWidth;
+				}
 
 				// set clipping region
 				ctx.save();
 				if (!radial) {
-					const region = new Path2D();
-					region.rect(0, channelTop, canvas.width, analyzerHeight);
-					ctx.clip(region);
+					ctx.beginPath();
+					ctx.rect(0, channelTop, canvas.width, analyzerHeight);
+					ctx.clip();
 				}
 			} // if ( useCanvas )
-
-			// get a new array of data from the FFT (linear magnitudes converted to dB)
-			if (dbSignal.current.length !== signal.length)
-				dbSignal.current = new Float32Array(signal.length);
-			let fftData = magnitudesToDb(signal, fftSize, dbSignal.current);
-
-			// apply weighting
-			if (weightingFilter)
-				fftData = fftData.map((val, idx) => val + weightingdB(binToFreq(idx)));
 
 			// start drawing path (for graph mode)
 			ctx.beginPath();
 
 			// store line graph points to create mirror effect in radial mode
-			let points: number[][] = [];
+			let points: [number, number][] = [];
+			// replays the stored points backwards with mirrored direction
+			const drainMirrorPoints = () => {
+				for (let p = points.pop(); p; p = points.pop()) {
+					ctx.lineTo(...radialXY(p[0], p[1], -1));
+				}
+			};
 
 			// draw bars / lines
 
@@ -1674,7 +1791,9 @@ const AudioAnalyzer: React.FC = () => {
 
 				// check additional bins (if any) for this bar and keep the highest value
 				for (let j = binLo + 1; j < binHi; j++) {
-					if (fftData[j] > barValue) barValue = fftData[j];
+					if (fftData[j] > barValue) {
+						barValue = fftData[j];
+					}
 				}
 
 				// normalize bar amplitude in [0;1] range
@@ -1689,39 +1808,32 @@ const AudioAnalyzer: React.FC = () => {
 					// if hold is negative, start peak drop or fade out
 					if (bar.hold[channel] < 0) {
 						if (fadePeaks && !showPeakLine) {
-							const initialAlpha =
-								!isAlpha || (isOutline && lineWidth > 0)
-									? 1
-									: isAlpha
-										? bar.peak[channel]
-										: fillAlpha;
 							bar.alpha[channel] =
-								initialAlpha * (1 + bar.hold[channel] / fadeFrames); // hold is negative, so this is <= 1
-						} else
+								peakInitialAlpha(bar.peak[channel]) *
+								(1 + bar.hold[channel] / fadeFrames); // hold is negative, so this is <= 1
+						} else {
 							bar.peak[channel] +=
 								(bar.hold[channel] * gravity) / fpsSquared / nominalMaxHeight;
+						}
 						// make sure the peak value is reset when using fadePeaks
-						if (bar.alpha[channel] <= 0) bar.peak[channel] = 0;
+						if (bar.alpha[channel] <= 0) {
+							bar.peak[channel] = 0;
+						}
 					}
 				}
 
-				// check if it's a new peak for this bar
 				if (barValue >= bar.peak[channel]) {
 					bar.peak[channel] = barValue;
 					bar.hold[channel] = holdFrames;
 					// check whether isAlpha or isOutline are active to start the peak alpha with the proper value
-					bar.alpha[channel] =
-						!isAlpha || (isOutline && lineWidth > 0)
-							? 1
-							: isAlpha
-								? barValue
-								: fillAlpha;
+					bar.alpha[channel] = peakInitialAlpha(barValue);
 				}
 
 				// if not using the canvas, move earlier to the next bar
-				if (!useCanvas) continue;
+				if (!useCanvas) {
+					continue;
+				}
 
-				// set opacity for bar effects
 				ctx.globalAlpha =
 					isLumi || isAlpha ? barValue : isOutline ? fillAlpha : 1;
 
@@ -1730,10 +1842,10 @@ const AudioAnalyzer: React.FC = () => {
 
 				// compute actual bar height on screen
 				const barHeight = isLumi
-					? maxBarHeight
+					? barHeightMax
 					: isLeds
 						? ledPosY(barValue)
-						: (barValue * maxBarHeight) | 0;
+						: Math.trunc(barValue * barHeightMax);
 
 				// Draw current bar or line segment
 
@@ -1742,13 +1854,15 @@ const AudioAnalyzer: React.FC = () => {
 					// used to smooth the curve when the initial posX is off the screen, in mirror and radial modes
 					const nextBarAvg = barIndex
 						? 0
-						: (normalizedB(fftData[bars.current[1].binLo]) * maxBarHeight +
+						: (normalizedB(fftData[bars.current[1].binLo]) * barHeightMax +
 								barHeight) /
 							2;
 
 					if (radial) {
 						if (barIndex === 0) {
-							if (isDualHorizontal) ctx.moveTo(...radialXY(0, 0));
+							if (isDualHorizontal) {
+								ctx.moveTo(...radialXY(0, 0));
+							}
 							ctx.lineTo(...radialXY(0, posX < 0 ? nextBarAvg : barHeight));
 						}
 						// draw line to the current point, avoiding overlapping wrap-around frequencies
@@ -1761,25 +1875,25 @@ const AudioAnalyzer: React.FC = () => {
 						// Linear
 						if (barIndex === 0) {
 							// start the line off-screen using the previous FFT bin value as the initial amplitude
-							if (mirror === -1 && !isDualHorizontal)
+							if (mirror === -1 && !isDualHorizontal) {
 								ctx.moveTo(
 									initialX,
 									analyzerBottom - (posX < initialX ? nextBarAvg : barHeight),
 								);
-							else {
+							} else {
 								const prevFFTData = binLo
-									? normalizedB(fftData[binLo - 1]) * maxBarHeight
+									? normalizedB(fftData[binLo - 1]) * barHeightMax
 									: barHeight; // use previous FFT bin value, when available
 								ctx.moveTo(initialX - lineWidth, analyzerBottom - prevFFTData);
 							}
 						}
 						// draw line to the current point
 						// avoid X values lower than the origin when mirroring left, otherwise draw them for best graph accuracy
-						if (isDualHorizontal || mirror !== -1 || posX >= initialX)
+						if (isDualHorizontal || mirror !== -1 || posX >= initialX) {
 							ctx.lineTo(posX, analyzerBottom - barHeight);
+						}
 					}
-				} else {
-					if (isLeds) {
+				} else if (isLeds) {
 						// draw "unlit" leds - avoid drawing it twice on 'dual-combined' channel layout
 						if (showBgColor && !overlay && (channel === 0 || !isDualCombined)) {
 							const alpha = ctx.globalAlpha;
@@ -1792,11 +1906,7 @@ const AudioAnalyzer: React.FC = () => {
 						}
 						if (isTrueLeds) {
 							// ledPosY() is used below to fit one entire led height into the selected range
-							const colorIndex = isLumi
-								? 0
-								: colorStops.findLastIndex(
-										(item) => ledPosY(barValue) <= ledPosY(item.level),
-									);
+							const colorIndex = isLumi ? 0 : findLevelIndex(barValue);
 							let last = analyzerBottom;
 							for (let i = colorCount - 1; i >= colorIndex; i--) {
 								ctx.strokeStyle = colorStops[i].color;
@@ -1806,13 +1916,16 @@ const AudioAnalyzer: React.FC = () => {
 								strokeBar(barCenter, last, y);
 								last = y - ledSpaceV;
 							}
-						} else
+						} else {
 							strokeBar(barCenter, analyzerBottom, analyzerBottom - barHeight);
+						}
 					} else if (posX >= initialX) {
-						if (radial) radialPoly(posX, 0, width, barHeight, isOutline);
-						else if (isRound) {
+						if (radial) {
+							radialPoly(posX, 0, width, barHeight, isOutline);
+						} else if (isRound) {
 							const halfWidth = width / 2;
-							const y = analyzerBottom + halfWidth; // round caps have an additional height of half bar width
+							// round caps have an additional height of half bar width
+							const y = analyzerBottom + halfWidth;
 
 							ctx.beginPath();
 							ctx.moveTo(posX, y);
@@ -1834,7 +1947,6 @@ const AudioAnalyzer: React.FC = () => {
 							ctx.fill();
 						}
 					}
-				}
 
 				// Draw peak
 				const peakValue = bar.peak[channel];
@@ -1849,35 +1961,38 @@ const AudioAnalyzer: React.FC = () => {
 					posX >= initialX &&
 					posX < finalX
 				) {
-					// set opacity for peak
-					if (fadePeaks) ctx.globalAlpha = peakAlpha;
-					else if (isOutline && lineWidth > 0)
+					if (fadePeaks) {
+						ctx.globalAlpha = peakAlpha;
+					} else if (isOutline && lineWidth > 0) {
 						// when lineWidth == 0 ctx.globalAlpha remains set to `fillAlpha`
 						ctx.globalAlpha = 1;
-					else if (isAlpha)
+					} else if (isAlpha) {
 						// isAlpha (alpha based on peak value) supersedes fillAlpha if lineWidth == 0
 						ctx.globalAlpha = peakValue;
+					}
 
 					// select the peak color for 'bar-level' colorMode or 'trueLeds'
-					if (colorMode === COLOR_BAR_LEVEL || isTrueLeds)
+					if (colorMode === COLOR_BAR_LEVEL || isTrueLeds) {
 						setBarColor(peakValue);
+					}
 
 					// render peak according to current mode / effect
 					if (isLeds) {
 						const ledPeak = ledPosY(peakValue);
-						if (ledPeak >= ledSpaceV)
+						if (ledPeak >= ledSpaceV) {
 							// avoid peak below first led
 							ctx.fillRect(posX, analyzerBottom - ledPeak, width, ledHeight);
-					} else if (!radial)
+						}
+					} else if (!radial) {
 						ctx.fillRect(
 							posX,
-							analyzerBottom - peakValue * maxBarHeight,
+							analyzerBottom - peakValue * barHeightMax,
 							width,
 							2,
 						);
-					else if (mode !== MODE_GRAPH) {
+					} else if (mode !== MODE_GRAPH) {
 						// radial (peaks for graph mode are done by the peakLine code)
-						const y = peakValue * maxBarHeight;
+						const y = peakValue * barHeightMax;
 						radialPoly(
 							posX,
 							y,
@@ -1889,7 +2004,9 @@ const AudioAnalyzer: React.FC = () => {
 			} // for ( let barIndex = 0; barIndex < nBars; barIndex++ )
 
 			// if not using the canvas, move earlier to the next channel
-			if (!useCanvas) continue;
+			if (!useCanvas) {
+				continue;
+			}
 
 			// restore global alpha
 			ctx.globalAlpha = 1;
@@ -1900,16 +2017,14 @@ const AudioAnalyzer: React.FC = () => {
 
 				if (radial && !isDualHorizontal) {
 					if (mirror) {
-						let p: number[] | undefined;
-						while (points.length > 0) {
-							p = points.pop();
-							ctx.lineTo(...radialXY(...(p as [number, number]), -1));
-						}
+						drainMirrorPoints();
 					}
 					ctx.closePath();
 				}
 
-				if (lineWidth > 0) ctx.stroke();
+				if (lineWidth > 0) {
+					ctx.stroke();
+				}
 
 				if (fillAlpha > 0) {
 					if (radial) {
@@ -1951,23 +2066,21 @@ const AudioAnalyzer: React.FC = () => {
 							h = findY(x, h, nextBar.posX, nextBar.peak[channel], 0);
 							x = 0;
 						}
-						h *= maxBarHeight;
+						h *= barHeightMax;
 						if (showPeakLine) {
-							ctx[m](
-								...((radial ? radialXY(x, h) : [x, analyzerBottom - h]) as [
-									number,
-									number,
-								]),
-							);
-							if (radial && mirror && !isDualHorizontal) points.push([x, h]);
-						} else if (h > 0) radialPoly(x, h, 1, -2); // standard peaks (also does mirror)
+							const point: [number, number] = radial
+								? radialXY(x, h)
+								: [x, analyzerBottom - h];
+							ctx[m](...point);
+							if (radial && mirror && !isDualHorizontal) {
+								points.push([x, h]);
+							}
+						} else if (h > 0) {
+							radialPoly(x, h, 1, -2); // standard peaks (also does mirror)
+						}
 					});
 					if (showPeakLine) {
-						let p: number[] | undefined;
-						while (points.length > 0) {
-							p = points.pop();
-							ctx.lineTo(...radialXY(...(p as [number, number]), -1));
-						} // mirror line points
+						drainMirrorPoints(); // mirror line points
 						ctx.lineWidth = 1;
 						ctx.stroke(); // stroke peak line
 					}
@@ -1976,11 +2089,15 @@ const AudioAnalyzer: React.FC = () => {
 
 			ctx.restore(); // restore clip region
 
-			if (isDualHorizontal && !radial) ctx.setTransform(1, 0, 0, 1, 0, 0);
+			if (isDualHorizontal && !radial) {
+				ctx.setTransform(1, 0, 0, 1, 0, 0);
+			}
 
 			// create Reflex effect - for dual-combined and dual-horizontal do it only once, after channel 1
-			if (!(isDualHorizontal || isDualCombined) || channel) doReflex(channel);
-		} // for ( let channel = 0; channel < nChannels; channel++ ) {
+			if (!(isDualHorizontal || isDualCombined) || channel) {
+				doReflex(channel);
+			}
+		} // end channel loop
 
 		updateEnergy(currentEnergy / (nBars << (nChannels - 1)));
 
@@ -2003,7 +2120,7 @@ const AudioAnalyzer: React.FC = () => {
 			}
 
 			// restore solid lines
-			ctx.setLineDash([]);
+			ctx.setLineDash(NO_DASH);
 
 			// draw frequency scale (X-axis)
 			drawScaleX();
@@ -2021,83 +2138,61 @@ const AudioAnalyzer: React.FC = () => {
 				size * 2,
 			);
 		}
-	};
+	});
+
+	// run the render loop while audio is set up; cancel it on teardown or unmount
+	useEffect(() => {
+		if (!audio) {
+			return;
+		}
+		const tick = (timestamp: number) => {
+			runId.current = requestAnimationFrame(tick);
+			draw(timestamp);
+		};
+		runId.current = requestAnimationFrame(tick);
+		return () => {
+			if (runId.current !== null) {
+				cancelAnimationFrame(runId.current);
+			}
+			runId.current = null;
+		};
+	}, [audio]);
 
 	useLayoutEffect(() => {
-		if (canvasRef.current && canvasXRef.current && containerRef.current) {
-			const scaleX = canvasXRef.current.getContext("2d");
-			const ctx = canvasRef.current.getContext("2d");
-			if (scaleX && ctx) {
-				setCanvas({
-					reason: REASON.CREATE,
-					ready: true,
-					isFullscreen: isFullscreen,
-					fsEl: canvasRef.current,
-					container: containerRef.current,
-					canvas: canvasRef.current,
-					scaleX: scaleX,
-					loRes: false,
-					ctx: ctx,
-					setPixelRatio: (ratio: number) => {
-						pixelRatio.current = ratio;
-					},
-					defaultHeight,
-					defaultWidth,
-					overlay,
-					calcBars,
-					height,
-					width,
-				});
-			}
-		}
-	}, [isFullscreen, overlay, calcBars, height, width]);
+		applyCanvasSize(REASON.CREATE);
+	}, [applyCanvasSize]);
 
 	useEffect(() => {
+		const canvasEl = canvasRef.current;
 		const observer = new ResizeObserver(onResize);
 		observer.observe(document.body);
 
 		window.addEventListener(DOM_EVENT.RESIZE, onResize);
 
-		canvasRef.current?.addEventListener(DOM_EVENT.FULLSCREENCHANGE, () => {
+		const onFullscreenChange = () => {
 			fsChanging.current = true;
 			if (fsTimeout.current) {
 				clearTimeout(fsTimeout.current);
 				fsTimeout.current = 0;
 			}
-			if (canvasRef.current && canvasXRef.current && containerRef.current) {
-				const scaleX = canvasXRef.current.getContext("2d");
-				const ctx = canvasRef.current.getContext("2d");
-				if (scaleX && ctx) {
-					setCanvas({
-						reason: REASON.FSCHANGE,
-						ready: true,
-						isFullscreen: isFullscreen,
-						fsEl: canvasRef.current,
-						container: containerRef.current,
-						canvas: canvasRef.current,
-						scaleX: scaleX,
-						loRes: false,
-						ctx: ctx,
-						setPixelRatio: (ratio: number) => {
-							pixelRatio.current = ratio;
-						},
-						defaultHeight,
-						defaultWidth,
-						overlay,
-						calcBars,
-						height,
-						width,
-					});
-				}
-			}
+			applyCanvasSize(REASON.FSCHANGE);
 			fsChanging.current = false;
-		});
+		};
+		canvasEl?.addEventListener(DOM_EVENT.FULLSCREENCHANGE, onFullscreenChange);
 
 		return () => {
 			window.removeEventListener(DOM_EVENT.RESIZE, onResize);
+			canvasEl?.removeEventListener(
+				DOM_EVENT.FULLSCREENCHANGE,
+				onFullscreenChange,
+			);
 			observer.disconnect();
+			if (fsTimeout.current) {
+				clearTimeout(fsTimeout.current);
+				fsTimeout.current = 0;
+			}
 		};
-	}, [onResize, overlay, isFullscreen, calcBars, height, width]);
+	}, [onResize, applyCanvasSize]);
 
 	return (
 		<div>
@@ -2106,7 +2201,7 @@ const AudioAnalyzer: React.FC = () => {
 				<canvas id="scaleX" hidden ref={canvasXRef} />
 				<canvas id="scaleR" hidden ref={canvasRRef} />
 			</div>
-			{/* biome-ignore lint/a11y/useMediaCaption: <explanation> */}
+			{/* biome-ignore lint/a11y/useMediaCaption: plays live streams and user-uploaded audio, for which no caption track exists */}
 			<audio
 				src={audioSrc}
 				className="w-full mb-4"
@@ -2118,17 +2213,32 @@ const AudioAnalyzer: React.FC = () => {
 				<button
 					type="button"
 					onClick={async () => {
-						if (audioRef.current) {
-							const newAudio = await setupAudio((signal) => {
+						if (!audioRef.current) {
+							return;
+						}
+						try {
+							const onSignal = (signal: Float32Array) => {
 								latestSignal.current = signal;
-							}, audioRef.current);
-							setAudio(newAudio);
+							};
+							// ?engine=analyser switches to the native AnalyserNode prototype
+							const useAnalyser =
+								new URLSearchParams(window.location.search).get("engine") ===
+								"analyser";
+							const newAudio = await (useAnalyser
+								? setupAudioAnalyser(onSignal, audioRef.current)
+								: setupAudio(onSignal, audioRef.current));
 							audioCtx.current = newAudio.context;
 							audioNode.current = newAudio.node;
-
-							runId.current = requestAnimationFrame(draw);
-
+							setAudio(newAudio); // starts the render loop effect
 							setRunning(true);
+							setAudioError("");
+						} catch (error) {
+							console.error("Failed to start audio", error);
+							setAudioError(
+								error instanceof Error
+									? error.message
+									: "Unable to start audio",
+							);
 						}
 					}}
 				>
@@ -2138,11 +2248,14 @@ const AudioAnalyzer: React.FC = () => {
 				<button
 					type="button"
 					onClick={async () => {
-						if (running) {
-							await audio.context.suspend();
-							setRunning(audio.context.state === "running");
-						} else {
-							await audio.context.resume();
+						try {
+							await (running
+								? audio.context.suspend()
+								: audio.context.resume());
+						} catch (error) {
+							console.error("Failed to change audio state", error);
+							setAudioError("Unable to change playback state");
+						} finally {
 							setRunning(audio.context.state === "running");
 						}
 					}}
@@ -2154,6 +2267,9 @@ const AudioAnalyzer: React.FC = () => {
 					{running ? "Pause" : "Resume"}
 				</button>
 			)}
+			<p role="status" aria-live="polite">
+				{audioError}
+			</p>
 			<div className="flex container mb-4 mx-auto items-center justify-center gap-4">
 				<input
 					type="file"
@@ -2161,9 +2277,17 @@ const AudioAnalyzer: React.FC = () => {
 					accept="audio/*"
 					onChange={(e) => {
 						const file = e.target.files?.[0];
-						if (file) {
-							setUploadedUrl(URL.createObjectURL(file));
+						if (!file) {
+							return;
 						}
+						// `accept` only filters the picker; re-check the type at this trust boundary
+						if (!file.type.startsWith("audio/")) {
+							setAudioError("Please choose an audio file.");
+							e.target.value = "";
+							return;
+						}
+						setAudioError("");
+						setUploadedUrl(URL.createObjectURL(file));
 					}}
 				/>
 				<button type="button" title="Microphone ON/OFF">
@@ -2241,7 +2365,7 @@ const AudioAnalyzer: React.FC = () => {
 					<select
 						id="minFreq"
 						defaultValue={20}
-						ref={minFreqRef}
+						ref={freqMinRef}
 						onChange={(e) => {
 							audioNode.current?.port.postMessage({
 								type: "setMinFreq",
@@ -2269,7 +2393,7 @@ const AudioAnalyzer: React.FC = () => {
 					<select
 						id="maxFreq"
 						defaultValue={20000}
-						ref={maxFreqRef}
+						ref={freqMaxRef}
 						onChange={(e) => {
 							audioNode.current?.port.postMessage({
 								type: "setMaxFreq",

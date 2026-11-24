@@ -23,3 +23,6 @@ wasm-audio/target
 *.njsproj
 *.sln
 *.sw?
+
+# auditkit tracking, history, and worktrees
+.auditkit/

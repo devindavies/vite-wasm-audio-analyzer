@@ -1,9 +1,19 @@
 import init, { WasmSpectrumAnalyzer } from "@devinmdavies/wasm-fft-analyzer";
 import type { WasmAudioEvent } from "../types/Event.js";
 
+// ~62 analyses per second at 48 kHz. Multiple of the 128-sample render quantum.
+const ANALYSIS_HOP_SAMPLES = 768;
+
 export class FFTProcessor extends AudioWorkletProcessor {
 	totalSamples: number;
+	/** Time-ordered copy of the latest samples, handed to the WASM analyzer. */
 	samples: Float32Array;
+	/** Circular buffer the audio graph writes into. */
+	ring: Float32Array;
+	writeIndex: number;
+	samplesSinceAnalysis: number;
+	/** Number of new samples between two analyses. */
+	hopSamples: number;
 	detector: WasmSpectrumAnalyzer | null;
 	numAudioSamplesPerAnalysis: number;
 	maxFreq: number;
@@ -19,6 +29,10 @@ export class FFTProcessor extends AudioWorkletProcessor {
 		// array is used, so that early calls to process() with empty channels
 		// do not break initialization.
 		this.samples = new Float32Array(0);
+		this.ring = new Float32Array(0);
+		this.writeIndex = 0;
+		this.samplesSinceAnalysis = 0;
+		this.hopSamples = ANALYSIS_HOP_SAMPLES;
 		this.totalSamples = 0;
 		this.numAudioSamplesPerAnalysis = 0;
 
@@ -38,7 +52,7 @@ export class FFTProcessor extends AudioWorkletProcessor {
 				// RTANode has sent us a message containing the Wasm library to load into
 				// our context as well as information about the audio device used for
 				// recording.
-				init({ module_or_path: WebAssembly.compile(data) }).then(
+				void init({ module_or_path: WebAssembly.compile(data) }).then(
 					(initOuput) => {
 						this.port.postMessage({ type: "wasm-module-loaded" });
 						this.memory = initOuput.memory;
@@ -58,7 +72,10 @@ export class FFTProcessor extends AudioWorkletProcessor {
 				);
 				// Holds a buffer of audio sample values that we'll send to the Wasm module
 				// for analysis at regular intervals.
-				this.samples = new Float32Array(numAudioSamplesPerAnalysis).fill(0);
+				this.samples = new Float32Array(numAudioSamplesPerAnalysis);
+				this.ring = new Float32Array(numAudioSamplesPerAnalysis);
+				this.writeIndex = 0;
+				this.samplesSinceAnalysis = 0;
 				this.totalSamples = 0;
 				break;
 			}
@@ -76,67 +93,64 @@ export class FFTProcessor extends AudioWorkletProcessor {
 	process(inputs: Float32Array[][], outputs: Float32Array[][]) {
 		const inputChannels = inputs[0];
 		const outputChannels = outputs[0];
+		// An unconnected or paused source delivers no input channels.
+		const inputSamples = inputChannels?.[0];
+		if (!inputSamples) {
+			return true;
+		}
 		for (let channel = 0; channel < outputChannels.length; ++channel) {
-			outputChannels[channel].set(inputChannels[channel]);
+			const input = inputChannels[channel];
+			if (input) {
+				outputChannels[channel].set(input);
+			}
 		}
-		// inputSamples holds an array of new samples to process.
-		const inputSamples = inputChannels[0];
-		// In the AudioWorklet spec, process() is called whenever exactly 128 new
-		// audio samples have arrived. We simplify the logic for filling up the
-		// buffer by making an assumption that the analysis size is 128 samples or
-		// larger and is a power of 2.
-		if (
-			this.numAudioSamplesPerAnalysis &&
-			this.totalSamples < this.numAudioSamplesPerAnalysis
-		) {
-			for (const sampleValue of inputSamples) {
-				this.samples[this.totalSamples++] = sampleValue;
-			}
-		} else {
-			// Buffer is already full. We do not want the buffer to grow continually,
-			// so instead will "cycle" the samples through it so that it always
-			// holds the latest ordered samples of length equal to
-			// numAudioSamplesPerAnalysis.
-			// Shift the existing samples left by the length of new samples (128).
-			const numNewSamples = inputSamples.length;
-			const numExistingSamples = this.samples.length - numNewSamples;
-			for (let i = 0; i < numExistingSamples; i++) {
-				this.samples[i] = this.samples[i + numNewSamples];
-			}
-			// Add the new samples onto the end, into the 128-wide slot vacated by
-			// the previous copy.
-			for (let i = 0; i < numNewSamples; i++) {
-				this.samples[numExistingSamples + i] = inputSamples[i];
-			}
-			this.totalSamples += inputSamples.length;
+
+		const size = this.numAudioSamplesPerAnalysis;
+		if (!size) {
+			return true;
 		}
-		// Once our buffer has enough samples, pass them to the Wasm signal detector.
+
+		// Append the new samples (normally 128) to the ring buffer. `size` is a
+		// power of 2, so wrapping the write index is a mask.
+		const mask = size - 1;
+		let writeIndex = this.writeIndex;
+		for (let i = 0; i < inputSamples.length; i++) {
+			this.ring[writeIndex] = inputSamples[i];
+			writeIndex = (writeIndex + 1) & mask;
+		}
+		this.writeIndex = writeIndex;
+		this.totalSamples += inputSamples.length;
+		this.samplesSinceAnalysis += inputSamples.length;
+
+		// A display only needs ~60 updates per second, so analyze once per hop
+		// instead of once per 128-sample quantum.
 		if (
-			this.numAudioSamplesPerAnalysis &&
-			this.totalSamples >= this.numAudioSamplesPerAnalysis &&
-			this.detector &&
-			this.memory
+			this.totalSamples < size ||
+			this.samplesSinceAnalysis < this.hopSamples ||
+			!this.detector ||
+			!this.memory
 		) {
-			this.detector.analyze(this.samples, this.minFreq, this.maxFreq);
+			return true;
+		}
+		this.samplesSinceAnalysis = 0;
 
-			const outputPtr = this.detector.output();
-			// The analyzer outputs fftSize / 2 bins. Copy them out of wasm memory so
-			// only the bins (not the whole wasm memory) are sent to the main thread.
-			const output = new Float32Array(
-				this.memory.buffer,
-				outputPtr,
-				this.numAudioSamplesPerAnalysis / 2,
-			).slice();
+		// Unroll the ring buffer into time order (oldest sample first).
+		this.samples.set(this.ring.subarray(writeIndex), 0);
+		this.samples.set(this.ring.subarray(0, writeIndex), size - writeIndex);
 
-			if (output.length !== 0) {
-				this.port.postMessage(
-					{
-						type: "signal",
-						data: output,
-					},
-					[output.buffer],
-				);
-			}
+		this.detector.analyze(this.samples, this.minFreq, this.maxFreq);
+
+		const outputPtr = this.detector.output();
+		// The analyzer outputs fftSize / 2 bins. Copy them out of wasm memory so
+		// only the bins (not the whole wasm memory) are sent to the main thread.
+		const output = new Float32Array(
+			this.memory.buffer,
+			outputPtr,
+			size / 2,
+		).slice();
+
+		if (output.length !== 0) {
+			this.port.postMessage({ type: "signal", data: output }, [output.buffer]);
 		}
 		// Returning true tells the Audio system to keep going.
 		return true;
