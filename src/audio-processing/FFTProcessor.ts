@@ -119,18 +119,23 @@ export class FFTProcessor extends AudioWorkletProcessor {
 		) {
 			this.detector.analyze(this.samples, this.minFreq, this.maxFreq);
 
-			const outputPtr = this.detector.ouput();
+			const outputPtr = this.detector.output();
+			// The analyzer outputs fftSize / 2 bins. Copy them out of wasm memory so
+			// only the bins (not the whole wasm memory) are sent to the main thread.
 			const output = new Float32Array(
 				this.memory.buffer,
 				outputPtr,
-				this.numAudioSamplesPerAnalysis,
-			);
+				this.numAudioSamplesPerAnalysis / 2,
+			).slice();
 
 			if (output.length !== 0) {
-				this.port.postMessage({
-					type: "signal",
-					data: output,
-				});
+				this.port.postMessage(
+					{
+						type: "signal",
+						data: output,
+					},
+					[output.buffer],
+				);
 			}
 		}
 		// Returning true tells the Audio system to keep going.

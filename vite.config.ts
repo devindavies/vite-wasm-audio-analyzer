@@ -1,18 +1,15 @@
 import { resolve } from "node:path";
 import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react-oxc";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 // https://vitejs.dev/config/
 export default defineConfig({
-	plugins: [
-		react(),
-		tailwindcss(),
-	],
+	plugins: [react({ compiler: true }), tailwindcss()],
 	build: {
-		rollupOptions: {
+		rolldownOptions: {
 			input: {
-				main: resolve(__dirname, "index.html"),
+				main: resolve(import.meta.dirname, "index.html"),
 			},
 		},
 	},

@@ -34,6 +34,7 @@ import { FrequencyScale } from "../types/FrequencyScale";
 import type { Gradient } from "../types/Gradient";
 import setCanvas from "../utils/canvas/setCanvas";
 import { findY } from "../utils/findY";
+import { magnitudesToDb } from "../utils/magnitudesToDb";
 import type RTANode from "../utils/RTANode";
 import { setupAudio } from "../utils/setupAudio";
 
@@ -54,6 +55,7 @@ const AudioAnalyzer: React.FC = () => {
 	const [isFullscreen, setIsFullscreen] = useState(false);
 	const [overlay, setOverlay] = useState(false);
 	const latestSignal = useRef<Float32Array | number[]>([]);
+	const dbSignal = useRef(new Float32Array(0));
 
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const canvasXRef = useRef<HTMLCanvasElement>(null);
@@ -1630,8 +1632,10 @@ const AudioAnalyzer: React.FC = () => {
 				}
 			} // if ( useCanvas )
 
-			// get a new array of data from the FFT
-			let fftData = signal;
+			// get a new array of data from the FFT (linear magnitudes converted to dB)
+			if (dbSignal.current.length !== signal.length)
+				dbSignal.current = new Float32Array(signal.length);
+			let fftData = magnitudesToDb(signal, fftSize, dbSignal.current);
 
 			// apply weighting
 			if (weightingFilter)
