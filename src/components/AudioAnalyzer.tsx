@@ -43,6 +43,8 @@ type Mode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10;
 const defaultWidth = 640;
 const defaultHeight = 270;
 const maxFPS = 60;
+const defaultAudioSrc =
+	"https://audio-edge-qse4n.yyz.g.radiomast.io/8a384ff3-6fd1-4e5d-b47d-0cbefeffe8d7";
 
 const AudioAnalyzer: React.FC = () => {
 	const [audio, setAudio] = useState<
@@ -62,6 +64,13 @@ const AudioAnalyzer: React.FC = () => {
 	const canvasRRef = useRef<HTMLCanvasElement>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const audioRef = useRef<HTMLAudioElement>(null);
+	const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+
+	useEffect(() => {
+		return () => {
+			if (uploadedUrl) URL.revokeObjectURL(uploadedUrl);
+		};
+	}, [uploadedUrl]);
 
 	const fsTimeout = useRef<number | null>(null); // Fullscreen timeout
 	const fsChanging = useRef(false); // Fullscreen changing
@@ -2095,7 +2104,7 @@ const AudioAnalyzer: React.FC = () => {
 			</div>
 			{/* biome-ignore lint/a11y/useMediaCaption: <explanation> */}
 			<audio
-				src="https://audio-edge-qse4n.yyz.g.radiomast.io/8a384ff3-6fd1-4e5d-b47d-0cbefeffe8d7"
+				src={uploadedUrl ?? defaultAudioSrc}
 				className="w-full mb-4"
 				controls
 				crossOrigin="anonymous"
@@ -2149,8 +2158,7 @@ const AudioAnalyzer: React.FC = () => {
 					onChange={(e) => {
 						const file = e.target.files?.[0];
 						if (file) {
-							const url = URL.createObjectURL(file);
-							audioRef.current?.setAttribute("src", url);
+							setUploadedUrl(URL.createObjectURL(file));
 						}
 					}}
 				/>
