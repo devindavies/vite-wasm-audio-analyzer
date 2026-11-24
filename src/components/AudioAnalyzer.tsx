@@ -34,6 +34,7 @@ import { FrequencyScale } from "../types/FrequencyScale";
 import type { Gradient } from "../types/Gradient";
 import setCanvas from "../utils/canvas/setCanvas";
 import { findY } from "../utils/findY";
+import { magnitudesToDb } from "../utils/magnitudesToDb";
 import type RTANode from "../utils/RTANode";
 import { setupAudio } from "../utils/setupAudio";
 
@@ -42,13 +43,6 @@ type Mode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10;
 const defaultWidth = 640;
 const defaultHeight = 270;
 const maxFPS = 60;
-
-// Module-level pure helpers — allocated once, not per frame
-const clamp = (val: number, min: number, max: number) =>
-	val <= min ? min : val >= max ? max : val;
-const dBToLinear = (val: number) => 10 ** (val / 20);
-const linearTodB = (value: number) => 20 * Math.log10(value);
-const EMPTY_LEDS: [number, number, number, number] = [0, 0, 0, 0];
 
 const AudioAnalyzer: React.FC = () => {
 	const [audio, setAudio] = useState<
@@ -61,6 +55,7 @@ const AudioAnalyzer: React.FC = () => {
 	const [isFullscreen, setIsFullscreen] = useState(false);
 	const [overlay, setOverlay] = useState(false);
 	const latestSignal = useRef<Float32Array | number[]>([]);
+	const dbSignal = useRef(new Float32Array(0));
 
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const canvasXRef = useRef<HTMLCanvasElement>(null);
@@ -168,12 +163,6 @@ const AudioAnalyzer: React.FC = () => {
 	const bars = useRef<AnalyzerBarData[]>([]);
 	const leds = useRef<[number, number, number, number]>([0, 0, 0, 0]);
 	const canvasGradients = useRef<CanvasGradient[]>([]);
-	const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
-	const selectedGradsRef = useRef<string[]>([
-		`${GRADIENTS[0][0]}`,
-		`${GRADIENTS[0][0]}`,
-	]);
-	const weightedDataRef = useRef(new Float32Array(0));
 
 	const gradients = useMemo(() => {
 		const gradients: Record<string, Gradient> = {};
@@ -1140,6 +1129,9 @@ const AudioAnalyzer: React.FC = () => {
 	const normalizedB = (value: number) => {
 		const isLinear = linearAmplitude;
 		const boost = isLinear ? 1 / linearBoost : 1;
+		const clamp = (val: number, min: number, max: number) =>
+			val <= min ? min : val >= max ? max : val;
+		const dBToLinear = (val: number) => 10 ** (val / 20);
 
 		let maxValue = maxDecibels;
 		let minValue = minDecibels;
@@ -1201,7 +1193,7 @@ const AudioAnalyzer: React.FC = () => {
 		const canvasR = canvasRRef.current;
 		const canvas = canvasRef.current;
 		if (!(canvasX && canvasR && canvas)) return;
-		const ctx = ctxRef.current ?? canvas.getContext("2d");
+		const ctx = canvas.getContext("2d");
 		if (!ctx) return;
 
 		const fadeFrames = (fps.current * peakFadeTime) / 1e3;
@@ -1221,7 +1213,7 @@ const AudioAnalyzer: React.FC = () => {
 		const maxBarHeight = radial ? outerRadius - innerRadius : analyzerHeight;
 		const nominalMaxHeight = maxBarHeight / pixelRatio.current; // for consistent gravity on lo-res or hi-dpi
 		const dbRange = maxDecibels - minDecibels;
-		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = leds.current ?? EMPTY_LEDS;
+		const [ledCount, ledSpaceH, ledSpaceV, ledHeight] = leds.current || [];
 
 		if (energy.current.val > 0 && fps.current > 0)
 			spinAngle.current += (spinSpeed * TAU) / 60 / fps.current; // spinSpeed * angle increment per frame for 1 RPM
@@ -1288,6 +1280,7 @@ const AudioAnalyzer: React.FC = () => {
 			const SQ158_5 = 25122.25;
 			const SQ737_9 = 544496.41;
 			const SQ12194 = 148693636;
+			const linearTodB = (value: number) => 20 * Math.log10(value);
 
 			switch (weightingFilter) {
 				case FILTER.A: {
@@ -1391,7 +1384,8 @@ const AudioAnalyzer: React.FC = () => {
 
 		const nBars = bars.current.length;
 		const nChannels = isSingle ? 1 : 2;
-		const selectedGrads = selectedGradsRef.current;
+		if (!gradientSelectRef.current) return;
+		const selectedGrads = gradientSelectRef.current?.value.split(",");
 
 		for (let channel = 0; channel < nChannels; channel++) {
 			const { channelTop, channelBottom, analyzerBottom } =
@@ -1566,13 +1560,12 @@ const AudioAnalyzer: React.FC = () => {
 				)
 					color = canvasGradients.current[channel];
 				else {
-					const ledBarValue = isLeds ? ledPosY(value) : 0;
 					const selectedIndex =
 						colorMode === COLOR_BAR_INDEX
 							? barIndex % colorCount
 							: colorStops.findLastIndex((item) =>
 									isLeds
-										? ledBarValue <= ledPosY(item.level)
+										? ledPosY(value) <= ledPosY(item.level)
 										: value <= item.level,
 								);
 					color = colorStops[selectedIndex].color;
@@ -1639,20 +1632,15 @@ const AudioAnalyzer: React.FC = () => {
 				}
 			} // if ( useCanvas )
 
-			// get a new array of data from the FFT
-		let fftData: Float32Array | number[] = signal;
+			// get a new array of data from the FFT (linear magnitudes converted to dB)
+			if (dbSignal.current.length !== signal.length)
+				dbSignal.current = new Float32Array(signal.length);
+			let fftData = magnitudesToDb(signal, fftSize, dbSignal.current);
 
-		// apply weighting using a pre-allocated buffer to avoid per-frame allocations
-		if (weightingFilter) {
-			const sampleRate = audioCtx.current?.sampleRate ?? 48000;
-			const len = signal.length;
-			if (weightedDataRef.current.length !== len)
-				weightedDataRef.current = new Float32Array(len);
-			const weighted = weightedDataRef.current;
-			for (let i = 0; i < len; i++)
-				weighted[i] = (signal[i] as number) + weightingdB((i * sampleRate) / fftSize || 1);
-			fftData = weighted;
-		}
+			// apply weighting
+			if (weightingFilter)
+				fftData = fftData.map((val, idx) => val + weightingdB(binToFreq(idx)));
+
 			// start drawing path (for graph mode)
 			ctx.beginPath();
 
@@ -2027,7 +2015,6 @@ const AudioAnalyzer: React.FC = () => {
 			const scaleX = canvasXRef.current.getContext("2d");
 			const ctx = canvasRef.current.getContext("2d");
 			if (scaleX && ctx) {
-				ctxRef.current = ctx;
 				setCanvas({
 					reason: REASON.CREATE,
 					ready: true,
@@ -2216,10 +2203,7 @@ const AudioAnalyzer: React.FC = () => {
 						id="gradient"
 						defaultValue={`${GRADIENTS[0][0]},${GRADIENTS[0][0]}`}
 						ref={gradientSelectRef}
-						onChange={(e) => {
-							selectedGradsRef.current = e.target.value.split(",");
-							makeGrad();
-						}}
+						onChange={() => makeGrad()}
 					>
 						<option value={`${GRADIENTS[0][0]},${GRADIENTS[0][0]}`}>
 							Classic
