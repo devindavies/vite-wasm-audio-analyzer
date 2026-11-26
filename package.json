@@ -18,7 +18,7 @@
 		"react-dom": "^19.2.7"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.4",
+		"@biomejs/biome": "^2.6.8",
 		"@types/audioworklet": "^0.0.102",
 		"@types/node": "^26.6.6",
 		"@types/react": "^19.2.7",
